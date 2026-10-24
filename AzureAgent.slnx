@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AzureAgent.Api/AzureAgent.Api.csproj" />
+    <Project Path="src/AzureAgent.Application/AzureAgent.Application.csproj" />
+    <Project Path="src/AzureAgent.Domain/AzureAgent.Domain.csproj" />
+    <Project Path="src/AzureAgent.Infrastructure/AzureAgent.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AzureAgent.IntegrationTests/AzureAgent.IntegrationTests.csproj" />
+    <Project Path="tests/AzureAgent.UnitTests/AzureAgent.UnitTests.csproj" />
+  </Folder>
+</Solution>

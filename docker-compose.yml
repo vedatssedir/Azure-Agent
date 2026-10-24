@@ -1,0 +1,35 @@
+# Local infrastructure: PostgreSQL, Redis, RabbitMQ and Seq (log UI on http://localhost:5341).
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: azure_agent
+      POSTGRES_PASSWORD: azure_agent
+      POSTGRES_DB: azure_agent
+    ports: ["5432:5432"]
+    volumes: [postgres:/var/lib/postgresql/data]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports: ["5672:5672", "15672:15672"]
+  seq:
+    image: datalust/seq:2025.1
+    environment:
+      ACCEPT_EULA: "Y"
+    ports: ["5341:80"]
+  api:
+    build: .
+    profiles: [app]
+    depends_on: [postgres, redis, rabbitmq]
+    environment:
+      ConnectionStrings__Postgres: Host=postgres;Database=azure_agent;Username=azure_agent;Password=azure_agent
+      ConnectionStrings__Redis: redis:6379
+      ConnectionStrings__RabbitMq: amqp://guest:guest@rabbitmq:5672
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY}
+      Encryption__Key: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
+      Seq__Url: http://seq:80
+    ports: ["8080:8080"]
+volumes:
+  postgres:

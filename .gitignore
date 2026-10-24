@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+.workspaces/
+src/AzureAgent.Api/wwwroot/
+node_modules/
+web/dist/
+.env
+TestResults/
