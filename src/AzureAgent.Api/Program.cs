@@ -70,6 +70,8 @@ try
         o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
         o.AddPolicy("auth", http => RateLimitPartition.GetFixedWindowLimiter(http.ClientIp() ?? "unknown",
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1) }));
+        o.AddPolicy("refresh", http => RateLimitPartition.GetFixedWindowLimiter(http.ClientIp() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1) }));
         o.AddPolicy("hooks", http => RateLimitPartition.GetFixedWindowLimiter(http.Request.Path.Value ?? "",
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 600, Window = TimeSpan.FromMinutes(1) }));
     });

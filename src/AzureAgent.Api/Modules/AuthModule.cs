@@ -15,13 +15,13 @@ public sealed class AuthModule : ICarterModule
 
     public void AddRoutes(IEndpointRouteBuilder app)
     {
-        var auth = app.MapGroup("/api/auth").WithTags("Auth").RequireRateLimiting("auth");
+        var auth = app.MapGroup("/api/auth").WithTags("Auth");
         auth.MapPost("/setup", (SetupRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
-            bus.InvokeAsync<AuthResult>(new SetupCommand(r.Email, r.DisplayName, r.Password, r.OrganizationName, http.ClientIp()), ct)).AllowAnonymous();
+            bus.InvokeAsync<AuthResult>(new SetupCommand(r.Email, r.DisplayName, r.Password, r.OrganizationName, http.ClientIp()), ct)).AllowAnonymous().RequireRateLimiting("auth");
         auth.MapPost("/login", (LoginRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
-            bus.InvokeAsync<AuthResult>(new LoginCommand(r.Email, r.Password, http.ClientIp()), ct)).AllowAnonymous();
+            bus.InvokeAsync<AuthResult>(new LoginCommand(r.Email, r.Password, http.ClientIp()), ct)).AllowAnonymous().RequireRateLimiting("auth");
         auth.MapPost("/refresh", (RefreshRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
-            bus.InvokeAsync<AuthResult>(new RefreshCommand(r.RefreshToken, http.ClientIp()), ct)).AllowAnonymous();
+            bus.InvokeAsync<AuthResult>(new RefreshCommand(r.RefreshToken, http.ClientIp()), ct)).AllowAnonymous().RequireRateLimiting("refresh");
         auth.MapPost("/logout", async (RefreshRequest r, IMessageBus bus, CancellationToken ct) =>
         {
             await bus.InvokeAsync(new LogoutCommand(r.RefreshToken), ct);
