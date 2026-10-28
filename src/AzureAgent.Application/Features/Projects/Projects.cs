@@ -118,6 +118,16 @@ public sealed class UpdateProjectCommandValidator : AbstractValidator<UpdateProj
         RuleFor(x => x.Settings.SyncIntervalMinutes).InclusiveBetween(1, 1440);
         RuleFor(x => x.Settings.ReviewState).MaximumLength(50);
         RuleForEach(x => x.Settings.ClosedStates).NotEmpty().MaximumLength(50);
+        RuleForEach(x => x.Settings.TeamRoles).ChildRules(m =>
+        {
+            m.RuleFor(x => x.Team).NotEmpty().MaximumLength(200);
+            m.RuleFor(x => x.Role).IsInEnum();
+        });
+        RuleForEach(x => x.Settings.GroupRoles).ChildRules(m =>
+        {
+            m.RuleFor(x => x.GroupId).NotEmpty().Matches("^[0-9a-fA-F-]{36}$").WithMessage("Use the Entra ID group object id");
+            m.RuleFor(x => x.Role).IsInEnum();
+        });
     }
 }
 
@@ -144,7 +154,8 @@ public static class UpdateProjectHandler
 
 // Members ---------------------------------------------------------------------------------
 
-public sealed record ProjectMemberDto(Guid UserId, string Email, string DisplayName, ProjectRole Role, string? AzureUniqueName);
+public sealed record ProjectMemberDto(Guid UserId, string Email, string DisplayName, ProjectRole Role, string? AzureUniqueName,
+    MembershipSource Source = MembershipSource.Manual);
 
 public sealed record ListProjectMembersQuery(Guid ProjectId);
 
@@ -156,7 +167,7 @@ public static class ListProjectMembersHandler
         return await db.ProjectMembers.AsNoTracking().Where(m => m.ProjectId == query.ProjectId)
             .Join(db.Users, m => m.UserId, u => u.Id, (m, u) => new { m, u })
             .OrderBy(x => x.u.DisplayName)
-            .Select(x => new ProjectMemberDto(x.u.Id, x.u.Email, x.u.DisplayName, x.m.Role, x.m.AzureUniqueName)).ToListAsync(ct);
+            .Select(x => new ProjectMemberDto(x.u.Id, x.u.Email, x.u.DisplayName, x.m.Role, x.m.AzureUniqueName, x.m.Source)).ToListAsync(ct);
     }
 }
 
@@ -192,6 +203,8 @@ public static class SetProjectMemberHandler
         {
             member.Role = command.Role;
             member.AzureUniqueName = azureName;
+            // An explicit decision pins the membership: team sync no longer changes or removes it.
+            member.Source = MembershipSource.Manual;
         }
         db.Audit(current, organizationId, "project.member.saved", "user", command.UserId, new { command.Role, azureName }, command.ProjectId);
         await db.SaveChangesAsync(ct);

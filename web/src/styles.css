@@ -132,3 +132,20 @@ tr.clickable:hover td { background: var(--surface-2); }
   .main { padding: 16px; }
   .form-2 { grid-template-columns: 1fr; }
 }
+
+/* Sign-in with Microsoft and dividers */
+button.microsoft { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 9px 12px; font-weight: 600; }
+.ms-logo { display: grid; grid-template-columns: 9px 9px; gap: 2px; }
+.ms-logo i { width: 9px; height: 9px; display: block; }
+.ms-logo i:nth-child(1) { background: #f25022; }
+.ms-logo i:nth-child(2) { background: #7fba00; }
+.ms-logo i:nth-child(3) { background: #00a4ef; }
+.ms-logo i:nth-child(4) { background: #ffb900; }
+.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.row.wrap { flex-wrap: wrap; gap: 4px 16px; }
+.drawer textarea { font-family: inherit; font-size: 13px; min-height: 0; }
+fieldset.field { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+fieldset.field > legend { padding: 0; margin-bottom: 4px; font-weight: 600; font-size: 12px; }
+fieldset.field > .hint { font-size: 12px; color: var(--muted); }
+.prewrap { white-space: pre-wrap; }

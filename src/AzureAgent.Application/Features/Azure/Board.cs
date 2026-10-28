@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Common;
 using AzureAgent.Domain.Agents;
@@ -12,7 +13,8 @@ public sealed record WorkItemSummaryDto(int AzureId, string Type, string Title, 
     int? Priority, double? StoryPoints, IReadOnlyList<string> RepositoryNames, string? IterationPath, string WebUrl, DateTimeOffset ChangedAt,
     RunStatus? LastRunStatus, string? AgentName, decimal CostUsd);
 
-public sealed record ListWorkItemsQuery(Guid ProjectId, bool AssignedToMe = false, string? State = null, string? Search = null, string? Iteration = null);
+public sealed record ListWorkItemsQuery(Guid ProjectId, bool AssignedToMe = false, string? State = null, string? Search = null, string? Iteration = null,
+    Guid? TeamId = null, bool Unassigned = false);
 
 public static class ListWorkItemsHandler
 {
@@ -25,6 +27,12 @@ public static class ListWorkItemsHandler
             var me = await db.ProjectMembers.Where(m => m.ProjectId == query.ProjectId && m.UserId == user.UserId).Select(m => m.AzureUniqueName).FirstOrDefaultAsync(ct)
                 ?? user.Email;
             items = items.Where(w => w.AssignedToUniqueName == me);
+        }
+        if (query.Unassigned) items = items.Where(w => w.AssignedToUniqueName == null);
+        if (query.TeamId is { } teamId)
+        {
+            var team = await db.Teams.AsNoTracking().FirstOrDefaultAsync(t => t.Id == teamId && t.ProjectId == query.ProjectId, ct) ?? throw new NotFoundException("Team");
+            items = items.Where(TeamAreaFilter(team.Areas));
         }
         if (!string.IsNullOrWhiteSpace(query.State)) items = items.Where(w => w.State == query.State);
         if (!string.IsNullOrWhiteSpace(query.Iteration)) items = items.Where(w => w.IterationPath == query.Iteration);
@@ -47,6 +55,24 @@ public static class ListWorkItemsHandler
                 x.w.Priority, x.w.StoryPoints, x.w.RepositoryNames, x.w.IterationPath, x.w.WebUrl, x.w.ChangedAt,
                 x.LastRun == null ? null : x.LastRun.Status, x.LastRun == null ? null : x.LastRun.Agent, x.Cost))
             .ToListAsync(ct);
+    }
+
+    /// <summary>Work items in the team's area paths (Azure team field values), children included where the team says so.</summary>
+    public static Expression<Func<WorkItem, bool>> TeamAreaFilter(IReadOnlyCollection<TeamArea> areas)
+    {
+        var item = Expression.Parameter(typeof(WorkItem), "w");
+        var path = Expression.Property(item, nameof(WorkItem.AreaPath));
+        Expression body = Expression.Constant(false);
+        var startsWith = typeof(string).GetMethod(nameof(string.StartsWith), [typeof(string)])!;
+        foreach (var area in areas)
+        {
+            Expression match = Expression.Equal(path, Expression.Constant(area.Path, typeof(string)));
+            if (area.IncludeChildren)
+                match = Expression.OrElse(match, Expression.AndAlso(Expression.NotEqual(path, Expression.Constant(null, typeof(string))),
+                    Expression.Call(path, startsWith, Expression.Constant(area.Path + "\\"))));
+            body = Expression.OrElse(body, match);
+        }
+        return Expression.Lambda<Func<WorkItem, bool>>(body, item);
     }
 }
 
@@ -114,15 +140,109 @@ public static class AssignWorkItemHandler
             target = await db.ProjectMembers.Where(m => m.ProjectId == command.ProjectId && m.UserId == user.UserId).Select(m => m.AzureUniqueName).FirstOrDefaultAsync(ct)
                 ?? user.Email;
         }
-        var (project, azure) = await connector.ConnectAsync(command.ProjectId, ct);
+        // The change is made with the caller's own Azure credential when connected, so Azure history shows them.
+        var (project, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
         var updated = await azure.UpdateWorkItemFieldsAsync(command.AzureId, new Dictionary<string, object?> { ["System.AssignedTo"] = target ?? "" }, ct);
         WorkItemMapping.Apply(item, updated);
-        db.Audit(user, project.OrganizationId, "work_item.assigned", "work_item", command.AzureId, new { to = target }, project.Id);
+        db.Audit(user, project.OrganizationId, "work_item.assigned", "work_item", command.AzureId, new { to = target, asUser }, project.Id);
         await db.SaveChangesAsync(ct);
         var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
         await db.SaveChangesAsync(ct);
         var summary = (await ListWorkItemsHandler.Handle(new ListWorkItemsQuery(command.ProjectId, Search: $"#{command.AzureId}"), db, access, user, ct)).Single();
         return (summary, messages);
+    }
+}
+
+/// <summary>Creates a work item in Azure Boards (as the caller when connected) and mirrors it.</summary>
+public sealed record CreateWorkItemCommand(Guid ProjectId, string Type, string Title, string? Description, string? AcceptanceCriteria,
+    IReadOnlyList<string> RepositoryNames, IReadOnlyList<string>? Tags, bool AssignToMe, int? Priority);
+
+public sealed class CreateWorkItemCommandValidator : AbstractValidator<CreateWorkItemCommand>
+{
+    public CreateWorkItemCommandValidator()
+    {
+        RuleFor(x => x.Type).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.Title).NotEmpty().MaximumLength(255);
+        RuleFor(x => x.Description).MaximumLength(32_000);
+        RuleFor(x => x.AcceptanceCriteria).MaximumLength(32_000);
+        RuleFor(x => x.RepositoryNames).NotNull();
+        RuleForEach(x => x.RepositoryNames).NotEmpty().MaximumLength(200);
+        RuleForEach(x => x.Tags).NotEmpty().MaximumLength(100).Must(t => !t.Contains(';')).WithMessage("Tags cannot contain ';'");
+        RuleFor(x => x.Priority).InclusiveBetween(1, 4).When(x => x.Priority.HasValue);
+    }
+}
+
+public static class CreateWorkItemHandler
+{
+    public static async Task<(WorkItemSummaryDto, IEnumerable<object>)> Handle(CreateWorkItemCommand command, IAppDbContext db, AccessControl access,
+        ICurrentUser user, AzureConnector connector, Dispatcher dispatcher, CancellationToken ct)
+    {
+        await access.RequireAsync(command.ProjectId, Permission.WorkItemsCreate, ct);
+        var repositories = await db.Repositories.AsNoTracking().Where(r => r.ProjectId == command.ProjectId).Select(r => r.Name).ToListAsync(ct);
+        var unknown = command.RepositoryNames.Where(n => !repositories.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (unknown.Count > 0) throw new BusinessRuleException($"Unknown repositories: {string.Join(", ", unknown)}");
+
+        var (project, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
+        var tags = command.RepositoryNames.Select(n => $"repo:{repositories.First(r => r.Equals(n, StringComparison.OrdinalIgnoreCase))}")
+            .Concat(command.Tags ?? []).Distinct(StringComparer.OrdinalIgnoreCase);
+        string? assignee = null;
+        if (command.AssignToMe)
+            assignee = await db.ProjectMembers.Where(m => m.ProjectId == command.ProjectId && m.UserId == user.UserId).Select(m => m.AzureUniqueName).FirstOrDefaultAsync(ct)
+                ?? user.Email;
+        static string? Html(string? text) => string.IsNullOrWhiteSpace(text) ? null
+            : string.Join("", text.Trim().Split('\n').Select(l => $"<div>{System.Net.WebUtility.HtmlEncode(l.TrimEnd('\r'))}</div>"));
+        var type = (await azure.ListWorkItemTypesAsync(ct)).FirstOrDefault(t => t.Name.Equals(command.Type, StringComparison.OrdinalIgnoreCase))
+            ?? throw new BusinessRuleException($"Work item type '{command.Type}' does not exist in {project.AzureProjectName}");
+        var fields = new Dictionary<string, object?>
+        {
+            ["System.Title"] = command.Title.Trim(),
+            ["System.Description"] = Html(command.Description),
+            ["System.Tags"] = string.Join("; ", tags),
+            ["System.AssignedTo"] = assignee,
+        };
+        if (Html(command.AcceptanceCriteria) is { } criteria)
+        {
+            // The Basic process (Issue/Task) has no acceptance criteria field; keep the criteria in the description there.
+            if (type.Fields.Contains(WorkItemMapping.AcceptanceCriteriaField)) fields[WorkItemMapping.AcceptanceCriteriaField] = criteria;
+            else fields["System.Description"] = $"{fields["System.Description"]}<h3>Acceptance criteria</h3>{criteria}";
+        }
+        if (command.Priority is { } priority && type.Fields.Contains(WorkItemMapping.PriorityField)) fields[WorkItemMapping.PriorityField] = priority;
+        var created = await azure.CreateWorkItemAsync(type.Name, fields, ct);
+        var item = new WorkItem
+        {
+            OrganizationId = project.OrganizationId, ProjectId = project.Id, AzureId = created.Id, Type = "", Title = "", State = "",
+            WebUrl = azure.WorkItemWebUrl(created.Id),
+        };
+        WorkItemMapping.Apply(item, created);
+        db.WorkItems.Add(item);
+        db.Audit(user, project.OrganizationId, "work_item.created", "work_item", created.Id, new { command.Type, command.Title, asUser }, project.Id);
+        await db.SaveChangesAsync(ct);
+        var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
+        await db.SaveChangesAsync(ct);
+        var summary = (await ListWorkItemsHandler.Handle(new ListWorkItemsQuery(command.ProjectId, Search: $"#{created.Id}"), db, access, user, ct)).Single();
+        return (summary, messages);
+    }
+}
+
+public sealed record ListWorkItemTypesQuery(Guid ProjectId);
+
+public static class ListWorkItemTypesHandler
+{
+    public static async Task<IReadOnlyList<AzureWorkItemType>> Handle(ListWorkItemTypesQuery query, AccessControl access, AzureConnector connector,
+        ICacheService cache, CancellationToken ct)
+    {
+        await access.RequireAsync(query.ProjectId, Permission.WorkItemsView, ct);
+        var key = $"wit-types:{query.ProjectId:N}";
+        if (await cache.GetAsync<List<AzureWorkItemType>>(key, ct) is { } cached) return cached;
+        var (_, azure) = await connector.ConnectAsync(query.ProjectId, ct);
+        var hidden = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Test Case", "Test Plan", "Test Suite", "Shared Steps", "Shared Parameter", "Code Review Request", "Code Review Response",
+            "Feedback Request", "Feedback Response",
+        };
+        var types = (await azure.ListWorkItemTypesAsync(ct)).Where(t => !hidden.Contains(t.Name)).ToList();
+        await cache.SetAsync(key, types, TimeSpan.FromHours(1), ct);
+        return types;
     }
 }
 
@@ -157,7 +277,7 @@ public static class ListCommitsHandler
     }
 }
 
-public sealed record TeamDto(Guid Id, string Name, IReadOnlyList<TeamMemberDto> Members);
+public sealed record TeamDto(Guid Id, string Name, IReadOnlyList<TeamMemberDto> Members, IReadOnlyList<string> AreaPaths);
 
 public sealed record TeamMemberDto(string UniqueName, string DisplayName, Guid? AgentId, string? AgentName);
 
@@ -172,6 +292,7 @@ public static class ListTeamsHandler
         var agents = await db.Agents.AsNoTracking().Where(a => a.ProjectId == query.ProjectId && a.PairedUniqueName != null)
             .ToDictionaryAsync(a => a.PairedUniqueName!, ct);
         return teams.Select(t => new TeamDto(t.Id, t.Name, t.Members.OrderBy(m => m.DisplayName).Select(m =>
-            new TeamMemberDto(m.UniqueName, m.DisplayName, agents.GetValueOrDefault(m.UniqueName)?.Id, agents.GetValueOrDefault(m.UniqueName)?.Name)).ToList())).ToList();
+            new TeamMemberDto(m.UniqueName, m.DisplayName, agents.GetValueOrDefault(m.UniqueName)?.Id, agents.GetValueOrDefault(m.UniqueName)?.Name)).ToList(),
+            t.Areas.Select(a => a.IncludeChildren ? $"{a.Path} (+)" : a.Path).ToList())).ToList();
     }
 }

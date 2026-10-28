@@ -16,10 +16,21 @@ Status of the platform and the next steps, in order.
 - React UI: board, work item detail, repositories (history, policy, access rules), pull requests,
   agents, runs (step timeline), costs and budgets, members, settings, audit, organization admin.
 
+## Done (v0.2) – developers and identity
+
+- Azure team members → project memberships on every sync (team → role mapping, removal when people
+  leave, manual memberships pinned), team area paths and the team board.
+- Invitations (links, optional SMTP e-mail, renew/revoke), invitation acceptance.
+- Entra ID sign-in (OIDC + PKCE), account creation only for invited / team / mapped-group people,
+  Entra group → role mapping, delegated Azure DevOps token with refresh.
+- Personal Azure credentials (verified PAT or Entra token): assignments and new work items are
+  written as the person; optional requirement per project.
+- Service principal as the service identity (sync, git, pull requests) instead of the PAT.
+- New work items from the platform (process-aware), work item types, Vitest UI tests, live Azure tests.
+
 ## Next
 
-1. **Entra ID sign-in** (OIDC) next to local accounts; service principal / managed identity for
-   Azure DevOps instead of PATs.
+1. **Managed identity** for the service identity when hosted in Azure; Entra ID app roles.
 2. **Follow-up on PR feedback**: when reviewers comment or request changes, queue a follow-up run on
    the same branch.
 3. **Pipelines**: read build/test results of the PR (Azure Pipelines) and let the agent fix failures.

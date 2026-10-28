@@ -1,5 +1,6 @@
 using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Common;
+using AzureAgent.Application.Features.Identity;
 using AzureAgent.Domain.Identity;
 using FluentValidation;
 using Microsoft.EntityFrameworkCore;
@@ -8,7 +9,7 @@ namespace AzureAgent.Application.Features.Auth;
 
 public sealed record AuthResult(string AccessToken, DateTimeOffset AccessTokenExpiresAt, string RefreshToken, UserDto User);
 
-public sealed record UserDto(Guid Id, string Email, string DisplayName, bool IsSystemAdmin);
+public sealed record UserDto(Guid Id, string Email, string DisplayName, bool IsSystemAdmin, bool HasPassword = true);
 
 public sealed record OrganizationMembershipDto(Guid OrganizationId, string Name, string Slug, OrganizationRole Role);
 
@@ -22,7 +23,7 @@ internal static class AuthIssuer
         var (refresh, hash) = tokens.CreateRefreshToken();
         db.RefreshTokens.Add(new RefreshToken { UserId = user.Id, TokenHash = hash, ExpiresAt = clock.UtcNow + tokens.RefreshTokenLifetime, CreatedByIp = ip });
         await db.SaveChangesAsync(ct);
-        return new AuthResult(access.Token, access.ExpiresAt, refresh, new UserDto(user.Id, user.Email, user.DisplayName, user.IsSystemAdmin));
+        return new AuthResult(access.Token, access.ExpiresAt, refresh, new UserDto(user.Id, user.Email, user.DisplayName, user.IsSystemAdmin, user.PasswordHash is not null));
     }
 }
 
@@ -98,7 +99,7 @@ public static class LoginHandler
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(15);
 
     public static async Task<AuthResult> Handle(LoginCommand command, IAppDbContext db, IPasswordHasher hasher, ITokenService tokens,
-        IClock clock, CancellationToken ct)
+        IClock clock, ITenantContext tenant, InvitationService invitations, MembershipProvisioner provisioner, CancellationToken ct)
     {
         var email = command.Email.Trim().ToLowerInvariant();
         var user = await db.Users.FirstOrDefaultAsync(u => u.Email == email, ct);
@@ -106,7 +107,7 @@ public static class LoginHandler
         var invalid = new UnauthorizedException("Invalid email or password");
         if (user is null || !user.IsActive) throw invalid;
         if (user.LockedUntil > clock.UtcNow) throw new UnauthorizedException("Account is temporarily locked. Try again later.");
-        if (!hasher.Verify(command.Password, user.PasswordHash))
+        if (user.PasswordHash is null || !hasher.Verify(command.Password, user.PasswordHash))
         {
             user.FailedLoginCount++;
             if (user.FailedLoginCount >= MaxFailedAttempts)
@@ -120,6 +121,11 @@ public static class LoginHandler
         user.FailedLoginCount = 0;
         user.LockedUntil = null;
         user.LastLoginAt = clock.UtcNow;
+        // Pick up invitations and Azure team memberships granted since the last sign-in.
+        tenant.UseAllOrganizations();
+        await invitations.AcceptPendingAsync(user, ct);
+        await db.SaveChangesAsync(ct);
+        await provisioner.ProvisionUserAsync(user, [], ct);
         return await AuthIssuer.IssueAsync(user, db, tokens, clock, command.Ip, ct);
     }
 }
@@ -189,19 +195,19 @@ public static class GetMeHandler
             .Join(db.Organizations, m => m.OrganizationId, o => o.Id, (m, o) => new { m, o })
             .OrderBy(x => x.o.Name)
             .Select(x => new OrganizationMembershipDto(x.o.Id, x.o.Name, x.o.Slug, x.m.Role)).ToListAsync(ct);
-        return new MeDto(new UserDto(user.Id, user.Email, user.DisplayName, user.IsSystemAdmin), organizations);
+        return new MeDto(new UserDto(user.Id, user.Email, user.DisplayName, user.IsSystemAdmin, user.PasswordHash is not null), organizations);
     }
 }
 
 // Change password -----------------------------------------------------------------------
 
-public sealed record ChangePasswordCommand(string CurrentPassword, string NewPassword);
+/// <summary>Changes (or, for accounts created by Entra ID sign-in, sets) the local password.</summary>
+public sealed record ChangePasswordCommand(string? CurrentPassword, string NewPassword);
 
 public sealed class ChangePasswordCommandValidator : AbstractValidator<ChangePasswordCommand>
 {
     public ChangePasswordCommandValidator()
     {
-        RuleFor(x => x.CurrentPassword).NotEmpty();
         RuleFor(x => x.NewPassword).SetValidator(new PasswordValidator()).NotEqual(x => x.CurrentPassword);
     }
 }
@@ -212,7 +218,8 @@ public static class ChangePasswordHandler
     {
         var userId = current.UserId ?? throw new UnauthorizedException();
         var user = await db.Users.FirstAsync(u => u.Id == userId, ct);
-        if (!hasher.Verify(command.CurrentPassword, user.PasswordHash)) throw new BusinessRuleException("Current password is incorrect");
+        if (user.PasswordHash is not null && (command.CurrentPassword is null || !hasher.Verify(command.CurrentPassword, user.PasswordHash)))
+            throw new BusinessRuleException("Current password is incorrect");
         user.PasswordHash = hasher.Hash(command.NewPassword);
         foreach (var token in await db.RefreshTokens.Where(t => t.UserId == userId && t.RevokedAt == null).ToListAsync(ct)) token.RevokedAt = clock.UtcNow;
         await db.SaveChangesAsync(ct);

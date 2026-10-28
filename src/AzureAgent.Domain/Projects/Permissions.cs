@@ -14,6 +14,7 @@ public static class Permission
 
     public const string WorkItemsView = "workitems.view";
     public const string WorkItemsAssign = "workitems.assign";
+    public const string WorkItemsCreate = "workitems.create";
 
     public const string RepositoryView = "repo.view";
     public const string RepositoryAgentWrite = "repo.agent.write";
@@ -32,7 +33,7 @@ public static class Permission
     public static readonly IReadOnlyList<string> All =
     [
         ProjectView, ProjectManage, MembersManage, SettingsManage, SecretsManage,
-        WorkItemsView, WorkItemsAssign,
+        WorkItemsView, WorkItemsAssign, WorkItemsCreate,
         RepositoryView, RepositoryAgentWrite, RepositoryPolicyManage,
         PullRequestsReview,
         AgentsView, AgentsManage, AgentsRun,
@@ -64,7 +65,7 @@ public static class RolePermissions
 
     private static readonly string[] Developer =
     [
-        .. Viewer, Permission.WorkItemsAssign, Permission.RepositoryAgentWrite, Permission.AgentsRun,
+        .. Viewer, Permission.WorkItemsAssign, Permission.WorkItemsCreate, Permission.RepositoryAgentWrite, Permission.AgentsRun,
     ];
 
     private static readonly string[] Reviewer = [.. Developer, Permission.PullRequestsReview];

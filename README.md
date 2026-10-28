@@ -53,6 +53,36 @@ tests/
    overrides). Runs stop when token, cost-per-run or monthly budgets (organization, project, agent)
    are exceeded. Reports group cost by agent, work item, day, model or run kind.
 
+## Developers and sign-in
+
+How the people of the Azure DevOps teams get onto the platform:
+
+1. **Team sync** – every sync reads the project's Azure teams, their members and area paths.
+   Platform users whose e-mail equals an Azure team member's uniqueName get a project
+   membership with the mapped role (`Settings → Team → role`; no mapping = Developer, highest
+   role wins). People who leave every mapped team lose that membership; memberships set by hand
+   are never changed by sync. Runs on demand under **Members → Azure teams → Sync memberships**.
+2. **Invitations** – team members without an account are invited from **Members → Azure teams**
+   (or automatically with *auto-invite*). The link (7 days, single use, only its hash is stored)
+   lets them choose a password or sign in with Microsoft; e-mails go out when `Smtp` is set.
+3. **Entra ID sign-in** (optional, OIDC authorization code + PKCE) – a new identity gets an account
+   only when it is invited, in a synced Azure team, or in a mapped Entra ID group
+   (`Settings → Entra group → role`). The ID token is validated against the tenant's keys,
+   audience, per-tenant issuer, lifetime and nonce; multi-tenant sign-in needs `AllowedTenantIds`.
+4. **Acting as the person** – writes a person starts (assign, new work item) run with *their own*
+   Azure credential: the delegated token from Entra ID sign-in (refreshed automatically) or a PAT
+   connected under **My account**. Azure is asked who a PAT belongs to; a PAT of somebody else is
+   rejected. Without one the service identity is used, unless the project requires personal
+   credentials (`requireUserCredentialForWrites`).
+5. **Service identity** – sync, agent git pushes and PRs use a service principal when
+   `AZURE_DEVOPS_SP_TENANT_ID`, `AZURE_DEVOPS_SP_CLIENT_ID` and `AZURE_DEVOPS_SP_CLIENT_SECRET` are
+   set (add the app to the Azure DevOps organization as a user), otherwise `AZURE_DEVOPS_PAT`.
+
+Work items stay a 1:1 mirror of the whole project (one reader, no per-person polling). The board
+filters it: all, assigned to me, unassigned, or a team's area paths. **New work item** creates the
+item in Azure Boards with `repo:<name>` tags (acceptance criteria go into the description on
+process templates without that field, such as Basic).
+
 ## Security model
 
 - **Tenancy**: organizations are tenants; every tenant row carries `OrganizationId` and EF query
@@ -92,6 +122,11 @@ Production configuration (environment variables):
 | `Messaging__Durable` | Wolverine PostgreSQL outbox for durable messaging |
 | `Seq__Url`, `OpenTelemetry__Endpoint` | Observability |
 | `AgentRuntime__WorkspaceRoot` | Scratch space for clones |
+| `App__PublicUrl` | Public URL of the web app (invitation links) |
+| `Entra__Enabled`, `Entra__TenantId`, `Entra__ClientId`, `Entra__ClientSecret`, `Entra__RedirectUri` | Microsoft sign-in; redirect URI is `<PublicUrl>/auth/callback`. Delegated API permission: Azure DevOps `user_impersonation` |
+| `Entra__AllowedTenantIds__0` | Required when `TenantId` is `organizations` |
+| `Smtp__Host`, `Smtp__Port`, `Smtp__Username`, `Smtp__Password`, `Smtp__From` | Invitation e-mails (optional) |
+| `RateLimits__AuthPerMinute` | Sign-in attempts per IP and minute (default 20) |
 
 ## Tests
 
@@ -99,10 +134,17 @@ Production configuration (environment variables):
 dotnet test --project tests/AzureAgent.UnitTests
 TEST_POSTGRES="Host=localhost;Database=azure_agent_test;Username=azure_agent;Password=azure_agent" \
   dotnet test --project tests/AzureAgent.IntegrationTests
+cd web && npm test                       # Vitest + Testing Library
+
+# Optional, read-only checks against a real Azure DevOps project:
+AZURE_DEVOPS_LIVE_PAT=... AZURE_DEVOPS_LIVE_ORG=https://dev.azure.com/<org> AZURE_DEVOPS_LIVE_PROJECT=<project> \
+  dotnet test --project tests/AzureAgent.IntegrationTests --filter-class "AzureAgent.IntegrationTests.LiveAzureDevOpsTests"
 ```
 
 The integration suite runs the real API against PostgreSQL and real git repositories with an
 in-memory Azure DevOps project and a scripted model: assignment → agent run → push → PR → cost,
-role and repository permissions, tenant isolation, budgets and token limits, AI review, Service Hooks.
+role and repository permissions, tenant isolation, budgets and token limits, AI review, Service Hooks,
+Azure team → membership sync, invitations, personal PAT verification and on-behalf-of writes,
+Entra ID sign-in (account creation rules, group roles, token refresh) and the service principal.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the next steps.

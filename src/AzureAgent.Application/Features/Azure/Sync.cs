@@ -1,6 +1,6 @@
 using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Common;
-using AzureAgent.Application.Features.Secrets;
+using AzureAgent.Application.Features.Identity;
 using AzureAgent.Domain.Agents;
 using AzureAgent.Domain.Azure;
 using AzureAgent.Domain.Projects;
@@ -8,16 +8,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace AzureAgent.Application.Features.Azure;
-
-public sealed class AzureConnector(IAppDbContext db, SecretResolver secrets, IAzureDevOpsClientFactory factory)
-{
-    public async Task<(Project Project, IAzureDevOpsClient Client)> ConnectAsync(Guid projectId, CancellationToken ct)
-    {
-        var project = await db.Projects.FirstOrDefaultAsync(p => p.Id == projectId, ct) ?? throw new NotFoundException("Project");
-        var pat = await secrets.RequireAsync(projectId, SecretNames.AzureDevOpsPat, ct);
-        return (project, factory.Create(new AzureConnectionInfo(project.AzureOrganizationUrl, project.AzureProjectName, pat)));
-    }
-}
 
 /// <summary>Creates runs for assigned work and for pull requests that need review.</summary>
 public sealed class Dispatcher(IAppDbContext db, ILogger<Dispatcher> logger)
@@ -70,7 +60,8 @@ public sealed class Dispatcher(IAppDbContext db, ILogger<Dispatcher> logger)
     }
 }
 
-public sealed class ProjectSynchronizer(IAppDbContext db, AzureConnector connector, Dispatcher dispatcher, IClock clock, ILogger<ProjectSynchronizer> logger)
+public sealed class ProjectSynchronizer(IAppDbContext db, AzureConnector connector, Dispatcher dispatcher, MembershipProvisioner provisioner, IClock clock,
+    ILogger<ProjectSynchronizer> logger)
 {
     public async Task<(SyncResult Result, List<ExecuteAgentRun> Messages)> SyncAsync(Guid projectId, CancellationToken ct)
     {
@@ -83,13 +74,14 @@ public sealed class ProjectSynchronizer(IAppDbContext db, AzureConnector connect
             var ids = await azure.QueryWorkItemIdsAsync(WorkItemMapping.ReconciliationQuery(project.LastSyncedAt, project.Settings.ClosedStates), ct);
             var workItems = await UpsertWorkItemsAsync(project, azure, await azure.GetWorkItemsAsync(ids, ct), ct);
             await db.SaveChangesAsync(ct);
+            var members = await provisioner.SyncProjectAsync(project, "sync", ct);
 
             var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
             messages.AddRange(await dispatcher.QueueReviewsAsync(project, changedPullRequests, ct));
             project.LastSyncedAt = startedAt;
             project.LastSyncError = null;
             await db.SaveChangesAsync(ct);
-            var result = new SyncResult(teams, repositories, workItems, commits, pullRequests, messages.Count);
+            var result = new SyncResult(teams, repositories, workItems, commits, pullRequests, messages.Count, members.Added, members.Removed, members.Invited);
             logger.LogInformation("Synced project {Project}: {@Result}", project.Key, result);
             return (result, messages);
         }
@@ -127,6 +119,7 @@ public sealed class ProjectSynchronizer(IAppDbContext db, AzureConnector connect
             }
             row.Name = team.Name;
             row.Members = members;
+            row.Areas = (await azure.ListTeamAreasAsync(team.Id, ct)).Select(a => new TeamArea { Path = a.Path, IncludeChildren = a.IncludeChildren }).ToList();
         }
         return teams.Count;
     }

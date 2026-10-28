@@ -1,23 +1,23 @@
-using System.Text;
+using AzureAgent.Application.Abstractions;
 
 namespace AzureAgent.Infrastructure.AgentRuntime;
 
 public sealed class GitException(string message) : Exception(message);
 
 /// <summary>
-/// Git operations for one run. The PAT travels as an http.extraHeader in environment config
-/// (GIT_CONFIG_*), scoped to the Azure DevOps origin; it never appears in argv or remote URLs.
+/// Git operations for one run. The credential (PAT or Entra ID token) travels as an http.extraHeader
+/// in environment config (GIT_CONFIG_*), scoped to the Azure DevOps origin; it never appears in argv or remote URLs.
 /// </summary>
-public sealed class GitWorkspace(IProcessRunner processes, string organizationUrl, string personalAccessToken, string authorName, string authorEmail)
+public sealed class GitWorkspace(IProcessRunner processes, string organizationUrl, AzureCredential credential, string authorName, string authorEmail)
 {
     private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(10);
 
-    public IReadOnlyDictionary<string, string> Environment { get; } = BuildEnvironment(organizationUrl, personalAccessToken);
+    public IReadOnlyDictionary<string, string> Environment { get; } = BuildEnvironment(organizationUrl, credential);
 
-    public static IReadOnlyDictionary<string, string> BuildEnvironment(string organizationUrl, string pat)
+    public static IReadOnlyDictionary<string, string> BuildEnvironment(string organizationUrl, AzureCredential credential)
     {
         var origin = new Uri(organizationUrl).GetLeftPart(UriPartial.Authority);
-        var header = $"Authorization: Basic {Convert.ToBase64String(Encoding.UTF8.GetBytes($":{pat}"))}";
+        var header = $"Authorization: {credential.HeaderValue}";
         return new Dictionary<string, string>
         {
             ["GIT_CONFIG_COUNT"] = "1",

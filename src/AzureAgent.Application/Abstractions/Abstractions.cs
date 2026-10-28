@@ -12,6 +12,9 @@ public interface IAppDbContext
 {
     DbSet<User> Users { get; }
     DbSet<RefreshToken> RefreshTokens { get; }
+    DbSet<ExternalLogin> ExternalLogins { get; }
+    DbSet<Invitation> Invitations { get; }
+    DbSet<UserAzureCredential> UserAzureCredentials { get; }
     DbSet<Organization> Organizations { get; }
     DbSet<OrganizationMember> OrganizationMembers { get; }
     DbSet<Project> Projects { get; }
@@ -91,4 +94,47 @@ public interface ICacheService
     Task<T?> GetAsync<T>(string key, CancellationToken ct = default);
     Task SetAsync<T>(string key, T value, TimeSpan ttl, CancellationToken ct = default);
     Task RemoveAsync(string key, CancellationToken ct = default);
+}
+
+public sealed record OAuthToken(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt);
+
+/// <summary>Entra ID tokens for Azure DevOps (resource 499b84ac-1321-427f-aa17-267ca6975798).</summary>
+public interface IAzureTokenProvider
+{
+    /// <summary>Client-credentials token for a service principal (cached until shortly before expiry).</summary>
+    Task<OAuthToken> GetServicePrincipalTokenAsync(string tenantId, string clientId, string clientSecret, CancellationToken ct);
+    /// <summary>Redeems a delegated refresh token obtained at Entra ID sign-in.</summary>
+    Task<OAuthToken> RefreshUserTokenAsync(string refreshToken, CancellationToken ct);
+}
+
+/// <summary>A person authenticated by an external provider, with optional delegated Azure DevOps access.</summary>
+public sealed record ExternalIdentity(
+    string Provider,
+    string Subject,
+    string Email,
+    string DisplayName,
+    IReadOnlyList<string> Groups,
+    OAuthToken? AzureDevOpsToken);
+
+/// <summary>OpenID Connect sign-in (authorization code + PKCE) with Entra ID.</summary>
+public interface IExternalIdentityProvider
+{
+    bool Enabled { get; }
+    string Name { get; }
+    /// <summary>Returns the URL to redirect the browser to; state, nonce and the PKCE verifier are kept server side.</summary>
+    Task<string> BeginAsync(CancellationToken ct);
+    /// <summary>Redeems the code for the state issued by <see cref="BeginAsync"/> and validates the ID token.</summary>
+    Task<ExternalIdentity> CompleteAsync(string code, string state, CancellationToken ct);
+}
+
+public interface IEmailSender
+{
+    bool Enabled { get; }
+    Task SendAsync(string to, string subject, string html, CancellationToken ct);
+}
+
+/// <summary>Public base URL of the web app (for links in invitations and e-mails).</summary>
+public interface IAppLinks
+{
+    string InvitationUrl(string token);
 }

@@ -15,6 +15,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
 {
     public DbSet<User> Users => Set<User>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<ExternalLogin> ExternalLogins => Set<ExternalLogin>();
+    public DbSet<Invitation> Invitations => Set<Invitation>();
+    public DbSet<UserAzureCredential> UserAzureCredentials => Set<UserAzureCredential>();
     public DbSet<Organization> Organizations => Set<Organization>();
     public DbSet<OrganizationMember> OrganizationMembers => Set<OrganizationMember>();
     public DbSet<Project> Projects => Set<Project>();
@@ -55,6 +58,29 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
             e.HasIndex(x => x.UserId);
             e.HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         });
+        b.Entity<ExternalLogin>(e =>
+        {
+            e.HasIndex(x => new { x.Provider, x.Subject }).IsUnique();
+            e.HasIndex(x => x.UserId);
+            e.Property(x => x.Provider).HasMaxLength(32);
+            e.Property(x => x.Subject).HasMaxLength(200);
+            e.HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+        b.Entity<Invitation>(e =>
+        {
+            e.HasIndex(x => x.TokenHash).IsUnique();
+            e.HasIndex(x => new { x.OrganizationId, x.Email });
+            e.Property(x => x.Email).HasMaxLength(256);
+            e.Property(x => x.DisplayName).HasMaxLength(100);
+            e.HasOne<Organization>().WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+        });
+        b.Entity<UserAzureCredential>(e =>
+        {
+            e.HasIndex(x => new { x.UserId, x.Kind, x.AzureOrganizationUrl }).IsUnique().AreNullsDistinct(false);
+            e.Property(x => x.AzureOrganizationUrl).HasMaxLength(300);
+            e.Property(x => x.AzureUniqueName).HasMaxLength(256);
+            e.HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
         b.Entity<Organization>(e =>
         {
             e.HasIndex(x => x.Slug).IsUnique();
@@ -69,7 +95,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
         b.Entity<Project>(e =>
         {
             e.HasIndex(x => new { x.OrganizationId, x.Key }).IsUnique();
-            e.OwnsOne(x => x.Settings, s => s.ToJson());
+            e.OwnsOne(x => x.Settings, s =>
+            {
+                s.ToJson();
+                s.OwnsMany(x => x.TeamRoles);
+                s.OwnsMany(x => x.GroupRoles);
+            });
             e.Property(x => x.MonthlyBudgetUsd).HasPrecision(12, 2);
             e.HasOne<Organization>().WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -90,6 +121,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
         {
             e.HasIndex(x => new { x.ProjectId, x.AzureId }).IsUnique();
             e.OwnsMany(x => x.Members, m => m.ToJson());
+            e.OwnsMany(x => x.Areas, a => a.ToJson());
             e.HasOne<Project>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Cascade);
         });
         b.Entity<Repository>(e =>

@@ -1,16 +1,21 @@
 import { useMemo, useState } from "react";
-import { api, fmtDate, fmtUsd, p, type WorkItem, type WorkItemDetail } from "../api";
-import { Drawer, Empty, ErrorBox, RunBadge, useAction, useGet } from "../components/ui";
+import { api, fmtDate, fmtUsd, p, type Repository, type Team, type WorkItem, type WorkItemDetail, type WorkItemType } from "../api";
+import { Drawer, Empty, ErrorBox, Field, FieldGroup, RunBadge, useAction, useGet } from "../components/ui";
 import type { ProjectPageProps } from "./ProjectShell";
 
 const STATE_ORDER = ["New", "To Do", "Proposed", "Approved", "Active", "Committed", "Doing", "In Progress", "Resolved", "Closed", "Done", "Removed"];
 
+type View = "all" | "mine" | "unassigned" | `team:${string}`;
+
 export function Board({ project, can }: ProjectPageProps) {
-  const [mine, setMine] = useState(false);
+  const [view, setView] = useState<View>("all");
   const [search, setSearch] = useState("");
   const [iteration, setIteration] = useState("");
   const [open, setOpen] = useState<number | null>(null);
-  const query = new URLSearchParams({ ...(mine ? { mine: "true" } : {}), ...(search ? { search } : {}), ...(iteration ? { iteration } : {}) }).toString();
+  const [creating, setCreating] = useState(false);
+  const teams = useGet<Team[]>(["teams", project.id], p(project.id, "/teams"));
+  const filter: Record<string, string> = view === "mine" ? { mine: "true" } : view === "unassigned" ? { unassigned: "true" } : view.startsWith("team:") ? { team: view.slice(5) } : {};
+  const query = new URLSearchParams({ ...filter, ...(search ? { search } : {}), ...(iteration ? { iteration } : {}) }).toString();
   const items = useGet<WorkItem[]>(["work-items", project.id, query], p(project.id, `/work-items${query ? `?${query}` : ""}`), { refetchInterval: 15_000 });
   const closed = new Set(project.settings.closedStates);
   const [showClosed, setShowClosed] = useState(false);
@@ -29,15 +34,21 @@ export function Board({ project, can }: ProjectPageProps) {
   return (
     <>
       <div className="row" style={{ marginBottom: 12 }}>
+        <select aria-label="Görünüm" value={view} onChange={(e) => setView(e.target.value as View)} style={{ maxWidth: 220 }}>
+          <option value="all">Tüm maddeler</option>
+          <option value="mine">Bana atananlar</option>
+          <option value="unassigned">Atanmamış</option>
+          {teams.data?.map((t) => <option key={t.id} value={`team:${t.id}`}>Takım: {t.name}</option>)}
+        </select>
         <input placeholder="Ara: başlık veya #ID" value={search} onChange={(e) => setSearch(e.target.value)} style={{ maxWidth: 240 }} />
         <select value={iteration} onChange={(e) => setIteration(e.target.value)} style={{ maxWidth: 220 }}>
           <option value="">Tüm iterasyonlar</option>
           {iterations.map((i) => <option key={i} value={i}>{i}</option>)}
         </select>
-        <button className={mine ? "primary" : ""} onClick={() => setMine(!mine)}>Bana atananlar</button>
         <button className={showClosed ? "primary" : ""} onClick={() => setShowClosed(!showClosed)}>Kapananlar</button>
         <span className="spacer" />
         <span className="small muted">Developer bir maddeyi kendine atadığında, onun agent'ı işi başlatır.</span>
+        {can("workitems.create") ? <button className="primary" onClick={() => setCreating(true)}>Yeni madde</button> : null}
       </div>
       <ErrorBox error={items.error} />
       {!items.isLoading && columns.length === 0 ? (
@@ -68,6 +79,7 @@ export function Board({ project, can }: ProjectPageProps) {
           </section>
         ))}
       </div>
+      {creating ? <NewWorkItemDrawer projectId={project.id} onClose={() => setCreating(false)} onCreated={(id) => { setCreating(false); setOpen(id); }} /> : null}
       {open !== null ? <WorkItemDrawer projectId={project.id} azureId={open} canAssign={can("workitems.assign")} canRun={can("agents.run")} onClose={() => setOpen(null)} /> : null}
     </>
   );
@@ -94,8 +106,8 @@ function WorkItemDrawer({ projectId, azureId, canAssign, onClose }: { projectId:
           </> : null}
         </div>
         <div className="small muted">Repolar: {d.summary.repositoryNames.join(", ") || "yok — Azure'da repo:<ad> etiketi ekleyin"} · {d.summary.iterationPath} · Toplam maliyet {fmtUsd(d.summary.costUsd, 4)}</div>
-        <div className="card">{stripHtml(d.description) || <span className="muted">Açıklama yok</span>}</div>
-        {d.acceptanceCriteria ? <div className="card"><h3>Kabul kriterleri</h3>{stripHtml(d.acceptanceCriteria)}</div> : null}
+        <div className="card prewrap">{stripHtml(d.description) || <span className="muted">Açıklama yok</span>}</div>
+        {d.acceptanceCriteria ? <div className="card prewrap"><h3>Kabul kriterleri</h3>{stripHtml(d.acceptanceCriteria)}</div> : null}
 
         <section>
           <h2>Agent çalışmaları</h2>
@@ -138,8 +150,49 @@ function WorkItemDrawer({ projectId, azureId, canAssign, onClose }: { projectId:
   );
 }
 
+/** Creates the item in Azure Boards (as the signed-in person when their Azure account is connected). */
+function NewWorkItemDrawer({ projectId, onClose, onCreated }: { projectId: string; onClose: () => void; onCreated: (azureId: number) => void }) {
+  const types = useGet<WorkItemType[]>(["work-item-types", projectId], p(projectId, "/work-item-types"));
+  const repos = useGet<Repository[]>(["repos", projectId], p(projectId, "/repositories"));
+  const [form, setForm] = useState({ type: "", title: "", description: "", acceptanceCriteria: "", repositoryNames: [] as string[], assignToMe: true, priority: "2" });
+  const type = form.type || types.data?.[0]?.name || "";
+  const create = useAction(() => api<WorkItem>(p(projectId, "/work-items"), {
+    body: { ...form, type, priority: form.priority ? Number(form.priority) : null, tags: [] },
+  }), [["work-items", projectId]]);
+  const toggleRepo = (name: string) => setForm({ ...form, repositoryNames: form.repositoryNames.includes(name) ? form.repositoryNames.filter((r) => r !== name) : [...form.repositoryNames, name] });
+  return (
+    <Drawer title="Yeni madde" onClose={onClose}>
+      <ErrorBox error={types.error ?? create.error} />
+      <div className="form-2">
+        <Field label="Tür"><select value={type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+          {types.data?.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+        </select></Field>
+        <Field label="Öncelik"><select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
+          <option value="">—</option>{[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
+        </select></Field>
+      </div>
+      <Field label="Başlık"><input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></Field>
+      <Field label="Açıklama" hint="Agent'ın ne yapacağını, ilgili dosya/sınıf adlarını ve hataları yazın">
+        <textarea rows={6} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+      </Field>
+      <Field label="Kabul kriterleri"><textarea rows={3} value={form.acceptanceCriteria} onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })} /></Field>
+      <FieldGroup label="Repolar" hint="Agent bu repoları klonlar (Azure'da repo:<ad> etiketi olarak yazılır)">
+        <div className="row wrap">{repos.data?.map((r) => (
+          <label key={r.id} className="check"><input type="checkbox" checked={form.repositoryNames.includes(r.name)} onChange={() => toggleRepo(r.name)} disabled={!r.defaultBranch} /> {r.name}{!r.defaultBranch ? " (boş)" : ""}</label>
+        ))}</div>
+      </FieldGroup>
+      <label className="check"><input type="checkbox" checked={form.assignToMe} onChange={(e) => setForm({ ...form, assignToMe: e.target.checked })} /> Bana ata (agent'ım işi hemen başlatır)</label>
+      <div className="row"><span className="spacer" />
+        <button className="primary" disabled={create.busy || !form.title || !type} onClick={async () => { const item = await create.run(undefined); if (item) onCreated(item.azureId); }}>
+          {create.busy ? "Azure'da oluşturuluyor…" : "Azure'da oluştur"}
+        </button>
+      </div>
+    </Drawer>
+  );
+}
+
 // Azure HTML is rendered as text, never as markup.
 function stripHtml(html: string) {
-  return html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li)>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ")
+  return html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|h[1-6])>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&").trim();
 }

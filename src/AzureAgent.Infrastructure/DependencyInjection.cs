@@ -2,10 +2,12 @@ using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Common;
 using AzureAgent.Application.Features.Azure;
 using AzureAgent.Application.Features.Costs;
+using AzureAgent.Application.Features.Identity;
 using AzureAgent.Application.Features.Secrets;
 using AzureAgent.Infrastructure.AgentRuntime;
 using AzureAgent.Infrastructure.AzureDevOps;
 using AzureAgent.Infrastructure.Caching;
+using AzureAgent.Infrastructure.Identity;
 using AzureAgent.Infrastructure.Persistence;
 using AzureAgent.Infrastructure.Security;
 using Microsoft.EntityFrameworkCore;
@@ -25,6 +27,11 @@ public static class DependencyInjection
         services.AddOptions<EncryptionOptions>().Bind(configuration.GetSection(EncryptionOptions.Section))
             .Validate(o => o.Key.Length > 0, "Encryption:Key is required").ValidateOnStart();
         services.AddOptions<AgentRuntimeOptions>().Bind(configuration.GetSection(AgentRuntimeOptions.Section));
+        services.AddOptions<EntraOptions>().Bind(configuration.GetSection(EntraOptions.Section))
+            .Validate(o => !o.Problems().Any(), "Entra configuration is incomplete (ClientId, ClientSecret, RedirectUri, AllowedTenantIds for multi-tenant)")
+            .ValidateOnStart();
+        services.AddOptions<SmtpOptions>().Bind(configuration.GetSection(SmtpOptions.Section));
+        services.AddOptions<AppLinkOptions>().Bind(configuration.GetSection(AppLinkOptions.Section));
 
         services.AddHttpContextAccessor();
         services.AddDbContext<AppDbContext>(o => o.UseNpgsql(postgres, npgsql =>
@@ -56,7 +63,16 @@ public static class DependencyInjection
         }
         services.AddSingleton<ICacheService, DistributedCacheService>();
 
-        services.AddHttpClient(AzureDevOpsClientFactory.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(100));
+        services.AddMemoryCache();
+        services.AddHttpClient(AzureDevOpsClientFactory.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(100))
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
+        services.AddHttpClient(EntraTokenProvider.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(30));
+        services.AddSingleton<EntraTokenProvider>();
+        services.AddSingleton<IAzureTokenProvider>(sp => sp.GetRequiredService<EntraTokenProvider>());
+        if (configuration.GetValue("Entra:Enabled", false)) services.AddSingleton<IExternalIdentityProvider, EntraIdentityProvider>();
+        else services.AddSingleton<IExternalIdentityProvider, DisabledIdentityProvider>();
+        services.AddSingleton<IEmailSender, SmtpEmailSender>();
+        services.AddSingleton<IAppLinks, AppLinks>();
         services.AddHttpClient("anthropic", c => c.Timeout = TimeSpan.FromMinutes(5));
         services.AddSingleton<IAzureDevOpsClientFactory, AzureDevOpsClientFactory>();
         services.AddSingleton<IChatClientFactory, ChatClientFactory>();
@@ -66,6 +82,9 @@ public static class DependencyInjection
         services.AddScoped<AccessControl>();
         services.AddScoped<SecretResolver>();
         services.AddScoped<AzureConnector>();
+        services.AddScoped<UserAzureCredentials>();
+        services.AddScoped<InvitationService>();
+        services.AddScoped<MembershipProvisioner>();
         services.AddScoped<Dispatcher>();
         services.AddScoped<ProjectSynchronizer>();
         services.AddScoped<BudgetGuard>();

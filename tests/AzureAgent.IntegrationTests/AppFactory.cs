@@ -26,6 +26,8 @@ public sealed class AppFactory : WebApplicationFactory<Program>, IAsyncLifetime
 
     public FakeAzureDevOpsFactory Azure { get; } = new();
     public ScriptedChatClients Models { get; } = new();
+    public FakeIdentityProvider Sso { get; } = new();
+    public FakeTokenProvider Tokens { get; } = new();
     public string Root { get; } = Directory.CreateTempSubdirectory("azure-agent-tests-").FullName;
 
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
@@ -41,12 +43,19 @@ public sealed class AppFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("Jobs:Enabled", "false");
         builder.UseSetting("AgentRuntime:WorkspaceRoot", Path.Combine(Root, "workspaces"));
         builder.UseSetting("Messaging:AgentWorkers", "2");
+        builder.UseSetting("App:PublicUrl", "https://agent.test");
+        // Every test client shares one IP, so the per-IP sign-in limit is raised here.
+        builder.UseSetting("RateLimits:AuthPerMinute", "10000");
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<IAzureDevOpsClientFactory>();
             services.AddSingleton<IAzureDevOpsClientFactory>(Azure);
             services.RemoveAll<IChatClientFactory>();
             services.AddSingleton<IChatClientFactory>(Models);
+            services.RemoveAll<IExternalIdentityProvider>();
+            services.AddSingleton<IExternalIdentityProvider>(Sso);
+            services.RemoveAll<IAzureTokenProvider>();
+            services.AddSingleton<IAzureTokenProvider>(Tokens);
         });
     }
 

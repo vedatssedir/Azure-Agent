@@ -822,6 +822,108 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("ModelPrices", "app");
                 });
 
+            modelBuilder.Entity("AzureAgent.Domain.Identity.ExternalLogin", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("LastLoginAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("Provider", "Subject")
+                        .IsUnique();
+
+                    b.ToTable("ExternalLogins", "app");
+                });
+
+            modelBuilder.Entity("AzureAgent.Domain.Identity.Invitation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("AcceptedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("InvitedBy")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ProjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("OrganizationId", "Email");
+
+                    b.ToTable("Invitations", "app");
+                });
+
             modelBuilder.Entity("AzureAgent.Domain.Identity.Organization", b =>
                 {
                     b.Property<Guid>("Id")
@@ -961,7 +1063,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PasswordHash")
-                        .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
@@ -973,6 +1074,62 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("Users", "app");
+                });
+
+            modelBuilder.Entity("AzureAgent.Domain.Identity.UserAzureCredential", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AzureDisplayName")
+                        .HasColumnType("text");
+
+                    b.Property<string>("AzureOrganizationUrl")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("AzureUniqueName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<byte[]>("Ciphertext")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text");
+
+                    b.Property<byte[]>("RefreshCiphertext")
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("VerifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "Kind", "AzureOrganizationUrl")
+                        .IsUnique();
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("UserId", "Kind", "AzureOrganizationUrl"), false);
+
+                    b.ToTable("UserAzureCredentials", "app");
                 });
 
             modelBuilder.Entity("AzureAgent.Domain.Projects.Project", b =>
@@ -1046,6 +1203,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<int>("Role")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Source")
                         .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
@@ -1309,6 +1469,30 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.OwnsMany("AzureAgent.Domain.Azure.TeamArea", "Areas", b1 =>
+                        {
+                            b1.Property<Guid>("TeamId");
+
+                            b1.Property<int>("__synthesizedOrdinal")
+                                .ValueGeneratedOnAdd();
+
+                            b1.Property<bool>("IncludeChildren");
+
+                            b1.Property<string>("Path")
+                                .IsRequired();
+
+                            b1.HasKey("TeamId", "__synthesizedOrdinal");
+
+                            b1.ToTable("Teams", "app");
+
+                            b1
+                                .ToJson("Areas")
+                                .HasColumnType("jsonb");
+
+                            b1.WithOwner()
+                                .HasForeignKey("TeamId");
+                        });
+
                     b.OwnsMany("AzureAgent.Domain.Azure.TeamMember", "Members", b1 =>
                         {
                             b1.Property<Guid>("TeamId");
@@ -1334,6 +1518,8 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                                 .HasForeignKey("TeamId");
                         });
 
+                    b.Navigation("Areas");
+
                     b.Navigation("Members");
                 });
 
@@ -1342,6 +1528,24 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("AzureAgent.Domain.Projects.Project", null)
                         .WithMany()
                         .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AzureAgent.Domain.Identity.ExternalLogin", b =>
+                {
+                    b.HasOne("AzureAgent.Domain.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AzureAgent.Domain.Identity.Invitation", b =>
+                {
+                    b.HasOne("AzureAgent.Domain.Identity.Organization", null)
+                        .WithMany()
+                        .HasForeignKey("OrganizationId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -1372,6 +1576,15 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("AzureAgent.Domain.Identity.UserAzureCredential", b =>
+                {
+                    b.HasOne("AzureAgent.Domain.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("AzureAgent.Domain.Projects.Project", b =>
                 {
                     b.HasOne("AzureAgent.Domain.Identity.Organization", null)
@@ -1386,12 +1599,18 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
 
                             b1.Property<bool>("AutoDispatch");
 
+                            b1.Property<bool>("AutoInviteTeamMembers");
+
+                            b1.Property<bool>("AutoProvisionMembers");
+
                             b1.Property<bool>("AutoReviewPullRequests");
 
                             b1.PrimitiveCollection<string>("ClosedStates")
                                 .IsRequired();
 
                             b1.Property<bool>("RequireRunApproval");
+
+                            b1.Property<bool>("RequireUserCredentialForWrites");
 
                             b1.Property<string>("ReviewState");
 
@@ -1407,6 +1626,50 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
 
                             b1.WithOwner()
                                 .HasForeignKey("ProjectId");
+
+                            b1.OwnsMany("AzureAgent.Domain.Projects.GroupRoleMapping", "GroupRoles", b2 =>
+                                {
+                                    b2.Property<Guid>("ProjectSettingsProjectId");
+
+                                    b2.Property<int>("__synthesizedOrdinal")
+                                        .ValueGeneratedOnAdd();
+
+                                    b2.Property<string>("GroupId")
+                                        .IsRequired();
+
+                                    b2.Property<int>("Role");
+
+                                    b2.HasKey("ProjectSettingsProjectId", "__synthesizedOrdinal");
+
+                                    b2.ToTable("Projects", "app");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("ProjectSettingsProjectId");
+                                });
+
+                            b1.OwnsMany("AzureAgent.Domain.Projects.TeamRoleMapping", "TeamRoles", b2 =>
+                                {
+                                    b2.Property<Guid>("ProjectSettingsProjectId");
+
+                                    b2.Property<int>("__synthesizedOrdinal")
+                                        .ValueGeneratedOnAdd();
+
+                                    b2.Property<int>("Role");
+
+                                    b2.Property<string>("Team")
+                                        .IsRequired();
+
+                                    b2.HasKey("ProjectSettingsProjectId", "__synthesizedOrdinal");
+
+                                    b2.ToTable("Projects", "app");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("ProjectSettingsProjectId");
+                                });
+
+                            b1.Navigation("GroupRoles");
+
+                            b1.Navigation("TeamRoles");
                         });
 
                     b.Navigation("Settings")

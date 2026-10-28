@@ -1,5 +1,7 @@
 using AzureAgent.Application.Features.Audit;
+using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Features.Azure;
+using AzureAgent.Application.Features.Identity;
 using AzureAgent.Application.Features.Projects;
 using AzureAgent.Application.Features.Secrets;
 using AzureAgent.Domain.Azure;
@@ -16,6 +18,9 @@ public sealed class ProjectsModule : ICarterModule
     public sealed record SecretRequest(string Value);
     public sealed record AccessRuleRequest(Guid? UserId, ProjectRole? Role, string Permission, AccessEffect Effect);
     public sealed record AssignRequest(bool ToMe, string? UniqueName);
+    public sealed record CreateWorkItemRequest(string Type, string Title, string? Description, string? AcceptanceCriteria, IReadOnlyList<string> RepositoryNames,
+        IReadOnlyList<string>? Tags, bool AssignToMe, int? Priority);
+    public sealed record InvitePeopleRequest(IReadOnlyList<InviteePerson> People);
 
     public void AddRoutes(IEndpointRouteBuilder app)
     {
@@ -56,8 +61,21 @@ public sealed class ProjectsModule : ICarterModule
 
         projects.MapGet("/{projectId:guid}/teams", (Guid projectId, IMessageBus bus, CancellationToken ct) =>
             bus.InvokeAsync<IReadOnlyList<TeamDto>>(new ListTeamsQuery(projectId), ct));
-        projects.MapGet("/{projectId:guid}/work-items", (Guid projectId, bool? mine, string? state, string? search, string? iteration, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<IReadOnlyList<WorkItemSummaryDto>>(new ListWorkItemsQuery(projectId, mine == true, state, search, iteration), ct));
+        projects.MapGet("/{projectId:guid}/people", (Guid projectId, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<IReadOnlyList<ProjectPersonDto>>(new ListProjectPeopleQuery(projectId), ct));
+        projects.MapPost("/{projectId:guid}/people/provision", (Guid projectId, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<ProvisioningResult>(new ProvisionProjectMembersCommand(projectId), ct));
+        projects.MapPost("/{projectId:guid}/people/invite", (Guid projectId, InvitePeopleRequest r, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<IReadOnlyList<InvitationLinkDto>>(new CreateInvitationsCommand(r.People, Domain.Identity.OrganizationRole.Member, projectId), ct));
+
+        projects.MapGet("/{projectId:guid}/work-items", (Guid projectId, bool? mine, string? state, string? search, string? iteration, Guid? team, bool? unassigned,
+                IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<IReadOnlyList<WorkItemSummaryDto>>(new ListWorkItemsQuery(projectId, mine == true, state, search, iteration, team, unassigned == true), ct));
+        projects.MapPost("/{projectId:guid}/work-items", (Guid projectId, CreateWorkItemRequest r, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<WorkItemSummaryDto>(new CreateWorkItemCommand(projectId, r.Type, r.Title, r.Description, r.AcceptanceCriteria, r.RepositoryNames,
+                r.Tags, r.AssignToMe, r.Priority), ct));
+        projects.MapGet("/{projectId:guid}/work-item-types", (Guid projectId, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<IReadOnlyList<AzureWorkItemType>>(new ListWorkItemTypesQuery(projectId), ct));
         projects.MapGet("/{projectId:guid}/work-items/{azureId:int}", (Guid projectId, int azureId, IMessageBus bus, CancellationToken ct) =>
             bus.InvokeAsync<WorkItemDetailDto>(new GetWorkItemQuery(projectId, azureId), ct));
         projects.MapPost("/{projectId:guid}/work-items/{azureId:int}/assign", (Guid projectId, int azureId, AssignRequest r, IMessageBus bus, CancellationToken ct) =>

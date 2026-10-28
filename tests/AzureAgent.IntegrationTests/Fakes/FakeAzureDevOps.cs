@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Text.Json.Nodes;
 using AzureAgent.Application.Abstractions;
 
@@ -14,6 +16,24 @@ public sealed class FakeAzureDevOpsFactory : IAzureDevOpsClientFactory
     public IAzureDevOpsClient Create(AzureConnectionInfo connection) => Project(connection.Project).Create(connection);
 }
 
+/// <summary>Binds calls on the shared fake project to the credential of the client that made them.</summary>
+public class CredentialBoundClient : DispatchProxy
+{
+    internal FakeAzureDevOps Target { get; set; } = null!;
+    internal AzureCredential Credential { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? method, object?[]? args)
+    {
+        FakeAzureDevOps.CurrentCredential.Value = Credential;
+        try { return method!.Invoke(Target, args); }
+        catch (TargetInvocationException e) when (e.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Throw(e.InnerException);
+            throw;
+        }
+    }
+}
+
 /// <summary>In-memory Azure DevOps project. Repositories point at local bare git repositories.</summary>
 public sealed class FakeAzureDevOps : IAzureDevOpsClient
 {
@@ -27,14 +47,37 @@ public sealed class FakeAzureDevOps : IAzureDevOpsClient
     public List<(int PullRequestId, string Content, string? File, int? Line)> Threads { get; } = [];
     public Dictionary<string, string> FileContents { get; } = [];
     public string? RequiredPat { get; set; }
+    /// <summary>Who each credential token authenticates as (connectionData).</summary>
+    public ConcurrentDictionary<string, AzureIdentity> TokenIdentities { get; } = new();
+    public Dictionary<string, List<AzureIdentity>> TeamMembers { get; } = [];
+    public Dictionary<string, List<(string Path, bool IncludeChildren)>> TeamAreas { get; } = [];
+    /// <summary>Every write with the credential owner that made it.</summary>
+    public ConcurrentQueue<(string Operation, int WorkItemId, string Owner, string Scheme)> Writes { get; } = new();
+    public List<AzureWorkItemType> WorkItemTypes { get; } =
+    [
+        new("User Story", ["New", "Active", "Resolved", "Closed"], ["System.Title", "System.Description", "Microsoft.VSTS.Common.AcceptanceCriteria", "Microsoft.VSTS.Common.Priority"]),
+        new("Issue", ["To Do", "Doing", "Done"], ["System.Title", "System.Description", "Microsoft.VSTS.Common.Priority"]),
+    ];
+
+    internal static readonly AsyncLocal<AzureCredential?> CurrentCredential = new();
 
     public IAzureDevOpsClient Create(AzureConnectionInfo connection)
     {
-        if (RequiredPat is not null && connection.PersonalAccessToken != RequiredPat) throw new InvalidOperationException("Azure DevOps rejected the PAT (HTTP 401)");
-        return this;
+        if (RequiredPat is not null && connection.Credential.Token != RequiredPat) throw new InvalidOperationException("Azure DevOps rejected the PAT (HTTP 401)");
+        var client = DispatchProxy.Create<IAzureDevOpsClient, CredentialBoundClient>();
+        var bound = (CredentialBoundClient)(object)client;
+        bound.Target = this;
+        bound.Credential = connection.Credential;
+        return client;
     }
 
-    public void AddWorkItem(int id, string title, string state, string? assignee = null, string tags = "")
+    private void RecordWrite(string operation, int id)
+    {
+        var credential = CurrentCredential.Value;
+        Writes.Enqueue((operation, id, credential?.Owner ?? "?", credential?.Scheme ?? "?"));
+    }
+
+    public void AddWorkItem(int id, string title, string state, string? assignee = null, string tags = "", string? areaPath = null)
     {
         var fields = new Dictionary<string, object?>
         {
@@ -45,6 +88,7 @@ public sealed class FakeAzureDevOps : IAzureDevOpsClient
             ["System.Description"] = JsonValue.Create($"<p>{title} – details</p>"),
             ["System.ChangedDate"] = JsonValue.Create(DateTimeOffset.UtcNow.ToString("O")),
         };
+        if (areaPath is not null) fields["System.AreaPath"] = JsonValue.Create(areaPath);
         if (assignee is not null) fields["System.AssignedTo"] = Identity(assignee);
         WorkItems[id] = (1, fields);
     }
@@ -57,7 +101,37 @@ public sealed class FakeAzureDevOps : IAzureDevOpsClient
 
     public Task<string> GetProjectNameAsync(CancellationToken ct) => Task.FromResult("Shop");
     public Task<IReadOnlyList<AzureTeam>> ListTeamsAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<AzureTeam>>(Teams);
-    public Task<IReadOnlyList<AzureIdentity>> ListTeamMembersAsync(string teamId, CancellationToken ct) => Task.FromResult<IReadOnlyList<AzureIdentity>>(Members);
+    public Task<IReadOnlyList<AzureIdentity>> ListTeamMembersAsync(string teamId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<AzureIdentity>>(TeamMembers.GetValueOrDefault(teamId) ?? Members);
+    public Task<IReadOnlyList<(string Path, bool IncludeChildren)>> ListTeamAreasAsync(string teamId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<(string, bool)>>(TeamAreas.GetValueOrDefault(teamId) ?? []);
+
+    public Task<AzureIdentity> GetAuthenticatedIdentityAsync(CancellationToken ct) =>
+        CurrentCredential.Value is { } c && TokenIdentities.TryGetValue(c.Token, out var identity)
+            ? Task.FromResult(identity)
+            : throw new InvalidOperationException("Azure DevOps GET /_apis/connectionData failed with HTTP 401");
+
+    public Task<IReadOnlyList<AzureWorkItemType>> ListWorkItemTypesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<AzureWorkItemType>>(WorkItemTypes);
+
+    public Task<AzureWorkItem> CreateWorkItemAsync(string type, IReadOnlyDictionary<string, object?> fields, CancellationToken ct)
+    {
+        int id;
+        lock (WorkItems)
+        {
+            id = WorkItems.IsEmpty ? 1000 : WorkItems.Keys.Max() + 1;
+            var values = new Dictionary<string, object?>
+            {
+                ["System.WorkItemType"] = JsonValue.Create(type),
+                ["System.State"] = JsonValue.Create(WorkItemTypes.First(t => t.Name == type).States[0]),
+                ["System.ChangedDate"] = JsonValue.Create(DateTimeOffset.UtcNow.ToString("O")),
+            };
+            foreach (var (key, value) in fields)
+                values[key] = key == "System.AssignedTo" ? (value is string s && s.Length > 0 ? Identity(s) : null) : JsonValue.Create(value?.ToString());
+            WorkItems[id] = (1, values);
+        }
+        RecordWrite("create", id);
+        return Task.FromResult(GetWorkItemsAsync([id], ct).Result[0]);
+    }
     public Task<IReadOnlyList<AzureRepository>> ListRepositoriesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<AzureRepository>>(Repositories);
     public Task<IReadOnlyList<string>> ListRootFilesAsync(string repository, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>>(["Shop.sln", "README.md"]);
     public Task<IReadOnlyList<int>> QueryWorkItemIdsAsync(string wiql, CancellationToken ct) => Task.FromResult<IReadOnlyList<int>>(WorkItems.Keys.ToList());
@@ -77,6 +151,7 @@ public sealed class FakeAzureDevOps : IAzureDevOpsClient
         }
         current["System.ChangedDate"] = JsonValue.Create(DateTimeOffset.UtcNow.ToString("O"));
         WorkItems[id] = (rev + 1, current);
+        RecordWrite(fields.ContainsKey("System.AssignedTo") ? "assign" : "update", id);
         return Task.FromResult(GetWorkItemsAsync([id], ct).Result[0]);
     }
 

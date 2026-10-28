@@ -7,6 +7,9 @@ namespace AzureAgent.Application.Features.Azure;
 
 public static partial class WorkItemMapping
 {
+    public const string AcceptanceCriteriaField = "Microsoft.VSTS.Common.AcceptanceCriteria";
+    public const string PriorityField = "Microsoft.VSTS.Common.Priority";
+
     private static string Text(IReadOnlyDictionary<string, object?> fields, string name) =>
         fields.TryGetValue(name, out var value) && value is JsonValue json && json.TryGetValue<string>(out var s) ? s : value as string ?? "";
 

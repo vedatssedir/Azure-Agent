@@ -61,6 +61,11 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
   return <label className="field">{label}{hint ? <span className="hint">{hint}</span> : null}{children}</label>;
 }
 
+/** A labelled group of several controls (checkbox lists, tables); a <label> may only wrap one control. */
+export function FieldGroup({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return <fieldset className="field"><legend>{label}</legend>{hint ? <span className="hint">{hint}</span> : null}{children}</fieldset>;
+}
+
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>;
 }

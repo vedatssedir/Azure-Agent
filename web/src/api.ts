@@ -88,12 +88,16 @@ export type ModelProvider = "OpenAI" | "AzureOpenAI" | "Anthropic" | "Gemini";
 export type AgentKind = "Developer" | "Reviewer";
 
 export interface AuthResult { accessToken: string; accessTokenExpiresAt: string; refreshToken: string; user: User }
-export interface User { id: string; email: string; displayName: string; isSystemAdmin: boolean }
+export interface User { id: string; email: string; displayName: string; isSystemAdmin: boolean; hasPassword: boolean }
 export interface Me { user: User; organizations: Array<{ organizationId: string; name: string; slug: string; role: OrganizationRole }> }
 
+export interface TeamRoleMapping { team: string; role: ProjectRole }
+export interface GroupRoleMapping { groupId: string; role: ProjectRole }
 export interface ProjectSettings {
   autoDispatch: boolean; requireRunApproval: boolean; reviewState: string | null; closedStates: string[];
   autoReviewPullRequests: boolean; syncIntervalMinutes: number;
+  autoProvisionMembers: boolean; autoInviteTeamMembers: boolean; requireUserCredentialForWrites: boolean;
+  teamRoles: TeamRoleMapping[]; groupRoles: GroupRoleMapping[];
 }
 export interface Project {
   id: string; name: string; key: string; description: string | null; azureOrganizationUrl: string; azureProjectName: string;
@@ -121,7 +125,7 @@ export interface WorkItemDetail {
 export interface RepositoryPolicy { agentsEnabled: boolean; protectedBranches: string[]; autoReview: boolean; allowedCommands: string[]; maxFilesChangedPerRun: number }
 export interface Repository { id: string; name: string; defaultBranch: string | null; webUrl: string; policy: RepositoryPolicy; openPullRequests: number; lastCommitAt: string | null }
 export interface AccessRule { id: string; userId: string | null; role: ProjectRole | null; permission: string; effect: "Allow" | "Deny" }
-export interface Team { id: string; name: string; members: Array<{ uniqueName: string; displayName: string; agentId: string | null; agentName: string | null }> }
+export interface Team { id: string; name: string; members: Array<{ uniqueName: string; displayName: string; agentId: string | null; agentName: string | null }>; areaPaths: string[] }
 export interface AgentSettings { temperature: number | null; maxIterations: number; maxTokensPerRun: number; maxCostPerRunUsd: number; timeoutMinutes: number; endpoint: string | null }
 export interface Agent {
   id: string; name: string; kind: AgentKind; provider: ModelProvider; model: string; instructions: string; pairedUniqueName: string | null; teamId: string | null;
@@ -133,7 +137,20 @@ export interface RunDetail { run: RunSummary; summary: string | null; provider: 
 export interface CostRow { key: string; label: string; runs: number; succeededRuns: number; inputTokens: number; outputTokens: number; costUsd: number; averageCostPerRunUsd: number; averageDurationMinutes: number }
 export interface CostReport { from: string; to: string; groupBy: string; totalCostUsd: number; totalTokens: number; totalRuns: number; costPerSucceededRunUsd: number; rows: CostRow[] }
 export interface BudgetLine { scope: string; name: string; limitUsd: number | null; spentUsd: number; usedPercent: number | null }
-export interface Member { userId: string; email: string; displayName: string; role: ProjectRole; azureUniqueName: string | null }
+export type MembershipSource = "Manual" | "AzureTeam" | "EntraGroup";
+export interface Member { userId: string; email: string; displayName: string; role: ProjectRole; azureUniqueName: string | null; source: MembershipSource }
+export interface ProjectPerson {
+  uniqueName: string; displayName: string; teams: string[]; mappedRole: ProjectRole | null; userId: string | null; role: ProjectRole | null;
+  source: MembershipSource | null; azureConnected: boolean; invitationStatus: InvitationStatus | null; agentName: string | null;
+}
+export type InvitationStatus = "Pending" | "Accepted" | "Expired" | "Revoked";
+export interface InvitationLink { id: string; email: string; url: string; emailSent: boolean }
+export interface Invitation { id: string; email: string; displayName: string; role: OrganizationRole; status: InvitationStatus; expiresAt: string; createdAt: string; invitedBy: string; projectId: string | null }
+export interface InvitationInfo { email: string; displayName: string; organizationName: string; expiresAt: string; hasAccount: boolean; ssoEnabled: boolean }
+export interface AuthProviders { local: boolean; entra: boolean; entraName: string | null }
+export interface AzureCredential { id: string; kind: "PersonalAccessToken" | "OAuth"; azureOrganizationUrl: string | null; azureUniqueName: string; azureDisplayName: string | null; verifiedAt: string; expiresAt: string | null; lastError: string | null }
+export interface WorkItemType { name: string; states: string[]; fields: string[] }
+export interface ProvisioningResult { added: number; updated: number; removed: number; invited: number }
 export interface OrgMember { userId: string; email: string; displayName: string; role: OrganizationRole; isActive: boolean }
 export interface Secret { name: string; projectId: string | null; updatedAt: string }
 export interface Skill { id: string; key: string; name: string; description: string; content: string }
@@ -157,6 +174,11 @@ export const RUN_STATUS: Record<RunStatus, { label: string; cls: string }> = {
   Succeeded: { label: "Tamamlandı", cls: "ok" },
   Failed: { label: "Başarısız", cls: "bad" },
   Cancelled: { label: "İptal", cls: "" },
+};
+
+export const SOURCE_LABEL: Record<MembershipSource, string> = { Manual: "Elle", AzureTeam: "Azure takımı", EntraGroup: "Entra grubu" };
+export const INVITATION_LABEL: Record<InvitationStatus, { label: string; cls: string }> = {
+  Pending: { label: "Davet bekliyor", cls: "warn" }, Accepted: { label: "Kabul edildi", cls: "ok" }, Expired: { label: "Süresi doldu", cls: "bad" }, Revoked: { label: "İptal", cls: "" },
 };
 
 export const ROLE_LABEL: Record<ProjectRole, string> = { Viewer: "İzleyici", Developer: "Developer", Reviewer: "Reviewer", Maintainer: "Maintainer", Admin: "Proje yöneticisi" };

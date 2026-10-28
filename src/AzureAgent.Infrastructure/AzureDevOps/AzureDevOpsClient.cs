@@ -23,7 +23,7 @@ public sealed class AzureDevOpsClientFactory(IHttpClientFactory httpClients, ILo
 }
 
 /// <summary>
-/// Azure DevOps REST client. Authenticates with a PAT over HTTP Basic, retries 429/503 honoring
+/// Azure DevOps REST client. Authenticates with a PAT (HTTP Basic) or an Entra ID token (Bearer), retries 429/503 honoring
 /// Retry-After, and never includes response bodies in errors (they can echo request data).
 /// </summary>
 public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo connection, ILogger<AzureDevOpsClient> logger) : IAzureDevOpsClient
@@ -38,7 +38,7 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
 
     private readonly string _base = connection.OrganizationUrl.TrimEnd('/');
     private readonly string _project = Uri.EscapeDataString(connection.Project);
-    private readonly AuthenticationHeaderValue _auth = new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($":{connection.PersonalAccessToken}")));
+    private readonly AuthenticationHeaderValue _auth = AuthenticationHeaderValue.Parse(connection.Credential.HeaderValue);
 
     public static TimeSpan RetryDelay(int attempt, RetryConditionHeaderValue? retryAfter)
     {
@@ -55,6 +55,8 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
             using var request = new HttpRequestMessage(method, url);
             request.Headers.Authorization = _auth;
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            // Without this a rejected credential gets a 302 to the interactive sign-in page instead of a 401.
+            request.Headers.Add("X-TFS-FedAuthRedirect", "Suppress");
             if (body is not null) request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, contentType);
             using var response = await http.SendAsync(request, ct);
             if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable && attempt + 1 < MaxAttempts)
@@ -64,7 +66,7 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
                 await Task.Delay(delay, ct);
                 continue;
             }
-            // 203 is the sign-in page Azure returns for a rejected PAT.
+            // 203 and redirects are the sign-in page Azure returns for a rejected credential.
             if (!response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NonAuthoritativeInformation)
                 throw new AzureDevOpsException(response.StatusCode, method.Method, path.Split('?')[0]);
             var text = await response.Content.ReadAsStringAsync(ct);
@@ -88,6 +90,30 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
     public async Task<IReadOnlyList<AzureIdentity>> ListTeamMembersAsync(string teamId, CancellationToken ct) =>
         Values(await SendAsync(HttpMethod.Get, $"/_apis/projects/{_project}/teams/{Uri.EscapeDataString(teamId)}/members?$top=500", null, ct))
             .Select(m => new AzureIdentity(Str(m!["identity"]?["displayName"]), Str(m["identity"]?["uniqueName"]))).ToList();
+
+    public async Task<IReadOnlyList<(string Path, bool IncludeChildren)>> ListTeamAreasAsync(string teamId, CancellationToken ct) =>
+        ((await SendAsync(HttpMethod.Get, $"/{_project}/{Uri.EscapeDataString(teamId)}/_apis/work/teamsettings/teamfieldvalues", null, ct))?["values"]?.AsArray() ?? [])
+            .Select(v => (Str(v!["value"]), v["includeChildren"]?.GetValue<bool>() == true)).ToList();
+
+    public async Task<AzureIdentity> GetAuthenticatedIdentityAsync(CancellationToken ct)
+    {
+        var user = (await SendAsync(HttpMethod.Get, "/_apis/connectionData", null, ct, apiVersion: "7.1-preview.1"))?["authenticatedUser"];
+        var account = user?["properties"]?["Account"]?["$value"]?.GetValue<string>();
+        return new AzureIdentity(Str(user?["providerDisplayName"]), account ?? "");
+    }
+
+    public async Task<IReadOnlyList<AzureWorkItemType>> ListWorkItemTypesAsync(CancellationToken ct) =>
+        Values(await SendAsync(HttpMethod.Get, $"/{_project}/_apis/wit/workitemtypes", null, ct))
+            .Where(t => t!["isDisabled"]?.GetValue<bool>() != true)
+            .Select(t => new AzureWorkItemType(Str(t!["name"]), (t["states"]?.AsArray() ?? []).Select(st => Str(st!["name"])).ToList(),
+                (t["fields"]?.AsArray() ?? []).Select(f => Str(f!["referenceName"])).ToList())).ToList();
+
+    public async Task<AzureWorkItem> CreateWorkItemAsync(string type, IReadOnlyDictionary<string, object?> fields, CancellationToken ct)
+    {
+        var patch = fields.Where(f => f.Value is not null).Select(f => new { op = "add", path = $"/fields/{f.Key}", value = f.Value }).ToArray();
+        return ToWorkItem(await SendAsync(HttpMethod.Post, $"/{_project}/_apis/wit/workitems/${Uri.EscapeDataString(type)}", patch, ct,
+            contentType: "application/json-patch+json"));
+    }
 
     public async Task<IReadOnlyList<AzureRepository>> ListRepositoriesAsync(CancellationToken ct) =>
         Values(await SendAsync(HttpMethod.Get, $"/{_project}/_apis/git/repositories", null, ct))

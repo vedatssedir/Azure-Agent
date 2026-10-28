@@ -12,6 +12,14 @@ public sealed class Team : Entity, IOrganizationScoped
     public required string AzureId { get; init; }
     public required string Name { get; set; }
     public List<TeamMember> Members { get; set; } = [];
+    /// <summary>Area paths owned by the team (Azure team field values), used by the team board.</summary>
+    public List<TeamArea> Areas { get; set; } = [];
+}
+
+public sealed class TeamArea
+{
+    public required string Path { get; set; }
+    public bool IncludeChildren { get; set; }
 }
 
 public sealed class TeamMember

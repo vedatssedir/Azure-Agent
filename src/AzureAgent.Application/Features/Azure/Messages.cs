@@ -11,4 +11,5 @@ public sealed record SyncWorkItem(Guid OrganizationId, Guid ProjectId, int WorkI
 /// <summary>Execute one queued agent run. Routed to the "agent-runs" RabbitMQ queue in production.</summary>
 public sealed record ExecuteAgentRun(Guid OrganizationId, Guid RunId);
 
-public sealed record SyncResult(int Teams, int Repositories, int WorkItems, int Commits, int PullRequests, int QueuedRuns);
+public sealed record SyncResult(int Teams, int Repositories, int WorkItems, int Commits, int PullRequests, int QueuedRuns,
+    int MembersAdded = 0, int MembersRemoved = 0, int Invited = 0);

@@ -135,7 +135,7 @@ public sealed class WorkspaceSecurityTests : IDisposable
     [Fact]
     public void Git_auth_travels_in_environment_scoped_to_the_azure_origin()
     {
-        var env = GitWorkspace.BuildEnvironment("https://dev.azure.com/contoso", "secret-pat");
+        var env = GitWorkspace.BuildEnvironment("https://dev.azure.com/contoso", Application.Abstractions.AzureCredential.Pat("secret-pat"));
         env["GIT_CONFIG_KEY_0"].ShouldBe("http.https://dev.azure.com/.extraHeader");
         env["GIT_CONFIG_VALUE_0"].ShouldStartWith("Authorization: Basic ");
         env.Values.ShouldNotContain(v => v.Contains("secret-pat"));

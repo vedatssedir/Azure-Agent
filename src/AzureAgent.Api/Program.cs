@@ -65,11 +65,12 @@ try
     });
     builder.Services.AddAuthorization();
 
+    var authPerMinute = config.GetValue("RateLimits:AuthPerMinute", 20);
     builder.Services.AddRateLimiter(o =>
     {
         o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
         o.AddPolicy("auth", http => RateLimitPartition.GetFixedWindowLimiter(http.ClientIp() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1) }));
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = authPerMinute, Window = TimeSpan.FromMinutes(1) }));
         o.AddPolicy("refresh", http => RateLimitPartition.GetFixedWindowLimiter(http.ClientIp() ?? "unknown",
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1) }));
         o.AddPolicy("hooks", http => RateLimitPartition.GetFixedWindowLimiter(http.Request.Path.Value ?? "",

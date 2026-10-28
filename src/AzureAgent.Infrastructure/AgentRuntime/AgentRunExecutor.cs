@@ -118,8 +118,8 @@ public sealed partial class AgentRunExecutor(
                 throw new InvalidOperationException($"{agent.PairedUniqueName} does not have '{Permission.RepositoryAgentWrite}' on {repo.Name}");
         }
 
-        var pat = await secrets.RequireAsync(project.Id, SecretNames.AzureDevOpsPat, ct);
-        var git = new GitWorkspace(processes, project.AzureOrganizationUrl, pat, agent.Name, $"agent-{agent.Id:N}@azure-agent.local");
+        var credential = await connector.ServiceCredentialAsync(project.Id, ct);
+        var git = new GitWorkspace(processes, project.AzureOrganizationUrl, credential, agent.Name, $"agent-{agent.Id:N}@azure-agent.local");
         var branch = WorkItemMapping.BranchName(item.AzureId, item.Title);
         run.Branch = branch;
         if (repositories.SelectMany(r => r.Policy.ProtectedBranches).Any(p => BranchMatches(p, branch)))
@@ -169,8 +169,16 @@ public sealed partial class AgentRunExecutor(
 
         var links = string.Join(", ", run.PullRequestUrls.Select(u => $"<a href=\"{u}\">{u}</a>"));
         await azure.AddWorkItemCommentAsync(item.AzureId, $"Agent <b>{agent.Name}</b> opened {links}<br/>Cost: {run.CostUsd:0.0000} USD, {run.InputTokens + run.OutputTokens} tokens.", ct);
-        if (azureProject.Settings.ReviewState is { Length: > 0 } reviewState)
-            await azure.UpdateWorkItemFieldsAsync(item.AzureId, new Dictionary<string, object?> { ["System.State"] = reviewState }, ct);
+        if (azureProject.Settings.ReviewState is { Length: > 0 } reviewState && reviewState != item.State)
+        {
+            // Process templates differ (Basic has To Do/Doing/Done); an unknown state must not fail a run whose PR is already open.
+            var states = (await azure.ListWorkItemTypesAsync(ct)).FirstOrDefault(t => t.Name == item.Type)?.States ?? [];
+            if (states.Contains(reviewState))
+                await azure.UpdateWorkItemFieldsAsync(item.AzureId, new Dictionary<string, object?> { ["System.State"] = reviewState }, ct);
+            else
+                await AddStepAsync(run, RunStepType.Log, "Review state skipped",
+                    $"'{reviewState}' is not a state of {item.Type} ({string.Join(", ", states)}); update the project's review state setting.", ct: ct);
+        }
     }
 
     private async Task<bool> PairedDeveloperMayWriteAsync(Project project, Agent agent, Repository repo, CancellationToken ct)

@@ -5,7 +5,8 @@ import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/reac
 import "./styles.css";
 import { session, type Me, type Project } from "./api";
 import { useGet } from "./components/ui";
-import { Login } from "./pages/Login";
+import { AcceptInvitation, AuthCallback, Login } from "./pages/Login";
+import { Account } from "./pages/Account";
 import { Projects } from "./pages/Projects";
 import { ProjectShell } from "./pages/ProjectShell";
 import { AdminUsers } from "./pages/AdminUsers";
@@ -18,8 +19,15 @@ function Shell() {
   const [signedIn, setSignedIn] = useState(session.signedIn);
   const client = useQueryClient();
   useEffect(() => session.onSignOut(() => { client.clear(); setSignedIn(false); }), [client]);
-  if (!signedIn) return <Login onSignedIn={() => setSignedIn(true)} />;
-  return <SignedIn />;
+  const onSignedIn = () => { client.clear(); setSignedIn(true); };
+  return (
+    <Routes>
+      {/* Public pages: Entra ID return URL and invitation links work signed in or not. */}
+      <Route path="/auth/callback" element={<AuthCallback onSignedIn={onSignedIn} />} />
+      <Route path="/invite/:token" element={<AcceptInvitation onSignedIn={onSignedIn} />} />
+      <Route path="*" element={signedIn ? <SignedIn /> : <Login onSignedIn={onSignedIn} />} />
+    </Routes>
+  );
 }
 
 function SignedIn() {
@@ -58,7 +66,7 @@ function SignedIn() {
           <NavLink to="/admin/prices" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>Model fiyatları</NavLink>
         </> : null}
         <div className="sidebar-footer">
-          <span>{me.data.user.displayName}</span>
+          <NavLink to="/account" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>{me.data.user.displayName} · Hesabım</NavLink>
           <span>{organization.name} · {organization.role}</span>
           <a href="#" onClick={(e) => { e.preventDefault(); void session.signOut(); }}>Çıkış yap</a>
         </div>
@@ -67,6 +75,7 @@ function SignedIn() {
         <Routes>
           <Route path="/" element={<Projects canCreate={isOrgAdmin} />} />
           <Route path="/projects/:projectId/*" element={<ProjectShell me={me.data} />} />
+          <Route path="/account" element={<Account me={me.data} />} />
           <Route path="/admin/users" element={<AdminUsers me={me.data} />} />
           <Route path="/admin/skills" element={<AdminSkills />} />
           <Route path="/admin/prices" element={<AdminPrices />} />

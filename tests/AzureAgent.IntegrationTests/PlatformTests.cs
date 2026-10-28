@@ -17,90 +17,21 @@ using Shouldly;
 
 namespace AzureAgent.IntegrationTests;
 
-public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory>
+[Collection(PlatformCollection.Name)]
+public sealed class PlatformTests(AppFactory factory) : PlatformTestBase(factory)
 {
-    private const string Password = "Sup3rSecretPass";
-    private static readonly SemaphoreSlim BootstrapLock = new(1, 1);
-    private static (string Token, Guid OrganizationId)? _admin;
-
-    private Api NewApi() => new(factory.CreateClient());
-
-    private async Task<(Api Api, Guid OrganizationId)> AdminAsync()
-    {
-        await BootstrapLock.WaitAsync();
-        try
-        {
-            if (_admin is null)
-            {
-                var setup = await NewApi().Post<AuthResult>("/api/auth/setup",
-                    new { email = "admin@contoso.com", displayName = "Admin", password = Password, organizationName = "Contoso" });
-                var api = NewApi();
-                api.Authenticate(setup.AccessToken);
-                var me = await api.Get<MeDto>("/api/auth/me");
-                _admin = (setup.AccessToken, me.Organizations.Single().OrganizationId);
-            }
-        }
-        finally { BootstrapLock.Release(); }
-        var result = NewApi();
-        result.Authenticate(_admin.Value.Token, _admin.Value.OrganizationId);
-        return (result, _admin.Value.OrganizationId);
-    }
-
-    private async Task<Api> LoginAsync(string email, Guid organizationId)
-    {
-        var auth = await NewApi().Post<AuthResult>("/api/auth/login", new { email, password = Password });
-        var api = NewApi();
-        api.Authenticate(auth.AccessToken, organizationId);
-        return api;
-    }
-
-    private async Task<ProjectDto> CreateProjectAsync(Api admin, string key)
-    {
-        var project = await admin.Post<ProjectDto>("/api/projects", new
-        {
-            name = $"Shop {key}", key, azureOrganizationUrl = "https://dev.azure.com/contoso", azureProjectName = key,
-        });
-        (await admin.Send(HttpMethod.Put, $"/api/projects/{project.Id}/secrets/AZURE_DEVOPS_PAT", new { value = "pat-123456" })).EnsureSuccessStatusCode();
-        (await admin.Send(HttpMethod.Put, $"/api/projects/{project.Id}/secrets/ANTHROPIC_API_KEY", new { value = "sk-ant-test" })).EnsureSuccessStatusCode();
-        return project;
-    }
-
-    private async Task<OrganizationMemberDto> AddUserAsync(Api admin, string email, string name, OrganizationRole role = OrganizationRole.Member)
-    {
-        try
-        {
-            return await admin.Post<OrganizationMemberDto>("/api/organizations/members", new { email, displayName = name, role, initialPassword = Password });
-        }
-        catch (HttpRequestException)
-        {
-            return (await admin.Get<List<OrganizationMemberDto>>("/api/organizations/members")).Single(m => m.Email == email);
-        }
-    }
-
-    private static async Task<RunDetailDto> WaitForRunAsync(Api api, Guid projectId, Func<RunSummaryDto, bool> match)
-    {
-        for (var i = 0; i < 150; i++)
-        {
-            var run = (await api.Get<List<RunSummaryDto>>($"/api/projects/{projectId}/runs")).FirstOrDefault(match);
-            if (run is { Status: RunStatus.Succeeded or RunStatus.Failed or RunStatus.Cancelled })
-                return await api.Get<RunDetailDto>($"/api/projects/{projectId}/runs/{run.Id}");
-            await Task.Delay(200);
-        }
-        throw new TimeoutException("Run did not finish");
-    }
-
     [Fact]
     public async Task Developer_assigns_work_item_and_agent_delivers_a_pull_request_with_tracked_cost()
     {
         var (admin, organizationId) = await AdminAsync();
         var project = await CreateProjectAsync(admin, "FLOW");
-        var azure = factory.Azure.Project("FLOW");
-        var bare = factory.CreateRemoteRepository(azure, "api");
+        var azure = Factory.Azure.Project("FLOW");
+        var bare = Factory.CreateRemoteRepository(azure, "api");
         azure.AddWorkItem(101, "Add health endpoint", "New", tags: "repo:api; backend");
         azure.AddWorkItem(102, "Old bug", "Closed", assignee: "jane@contoso.com", tags: "repo:api");
 
         var sync = await admin.Post<SyncResult>($"/api/projects/{project.Id}/azure/sync", new { });
-        sync.ShouldBe(new SyncResult(1, 1, 2, 0, 0, 0));
+        (sync.Teams, sync.Repositories, sync.WorkItems, sync.Commits, sync.PullRequests, sync.QueuedRuns).ShouldBe((1, 1, 2, 0, 0, 0));
 
         // One developer agent per Azure team member, with a skill.
         await admin.Put<SkillDto>("/api/skills/dotnet", new { name = ".NET", content = "Always run dotnet test." });
@@ -122,8 +53,8 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
         await admin.Put<ProjectMemberDto>($"/api/projects/{project.Id}/members/{jane.UserId}", new { role = ProjectRole.Developer, azureUniqueName = "jane@contoso.com" });
         var janeApi = await LoginAsync("jane@contoso.com", organizationId);
 
-        factory.Models.Script.Enqueue(_ => ScriptedChatClients.ToolCall("write_file", new() { ["path"] = "api/Health.cs", ["content"] = "public static class Health { public const string Status = \"ok\"; }\n" }));
-        factory.Models.Script.Enqueue(_ => ScriptedChatClients.Text("Added Health.cs with a status constant. Tests: n/a."));
+        Factory.Models.Script.Enqueue(_ => ScriptedChatClients.ToolCall("write_file", new() { ["path"] = "api/Health.cs", ["content"] = "public static class Health { public const string Status = \"ok\"; }\n" }));
+        Factory.Models.Script.Enqueue(_ => ScriptedChatClients.Text("Added Health.cs with a status constant. Tests: n/a."));
 
         var assigned = await janeApi.Post<WorkItemSummaryDto>($"/api/projects/{project.Id}/work-items/101/assign", new { toMe = true });
         assigned.AssignedToUniqueName.ShouldBe("jane@contoso.com");
@@ -142,11 +73,11 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
         run.Steps.ShouldContain(s => s.Type == RunStepType.Git && s.Title == "Opened pull request in api");
 
         // Delivered to Azure: branch pushed, PR linked to the work item, comment, review state.
-        AppFactory.Git(factory.Root, "--git-dir", bare, "log", "--oneline", "ab/101-add-health-endpoint").ShouldContain("AB#101: Add health endpoint");
+        AppFactory.Git(Factory.Root, "--git-dir", bare, "log", "--oneline", "ab/101-add-health-endpoint").ShouldContain("AB#101: Add health endpoint");
         azure.PullRequests.Single().WorkItemId.ShouldBe(101);
         azure.Comments.ShouldContain(c => c.WorkItemId == 101 && c.Html.Contains("pullrequest/1"));
         azure.WorkItems[101].Fields["System.State"]!.ToString().ShouldBe("Resolved");
-        factory.Models.Created.ShouldContain(c => c.Provider == ModelProvider.Anthropic && c.ApiKey == "sk-ant-test");
+        Factory.Models.Created.ShouldContain(c => c.Provider == ModelProvider.Anthropic && c.ApiKey == "sk-ant-test");
 
         // Work item view links run, PR and cost; cost-per-job analysis.
         var detail = await janeApi.Get<WorkItemDetailDto>($"/api/projects/{project.Id}/work-items/101");
@@ -169,8 +100,8 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
     {
         var (admin, organizationId) = await AdminAsync();
         var project = await CreateProjectAsync(admin, "PERM");
-        var azure = factory.Azure.Project("PERM");
-        factory.CreateRemoteRepository(azure, "billing");
+        var azure = Factory.Azure.Project("PERM");
+        Factory.CreateRemoteRepository(azure, "billing");
         azure.AddWorkItem(201, "Fix invoice rounding", "Active", tags: "repo:billing");
         await admin.Post<SyncResult>($"/api/projects/{project.Id}/azure/sync", new { });
 
@@ -224,14 +155,14 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
     {
         var (admin, organizationId) = await AdminAsync();
         var project = await CreateProjectAsync(admin, "ISO");
-        var azure = factory.Azure.Project("ISO");
+        var azure = Factory.Azure.Project("ISO");
         var other = await admin.Post<OrganizationMembershipDto>("/api/organizations", new { name = "Globex" });
         var member = await AddUserAsync(admin, "member@contoso.com", "Mia Member");
         var memberApi = await LoginAsync("member@contoso.com", other.OrganizationId);
         (await memberApi.Send(HttpMethod.Get, "/api/projects")).StatusCode.ShouldBe(HttpStatusCode.Forbidden);
 
         var globexAdmin = NewApi();
-        globexAdmin.Authenticate(_admin!.Value.Token, other.OrganizationId);
+        globexAdmin.Authenticate(AdminToken, other.OrganizationId);
         (await globexAdmin.Get<List<ProjectDto>>("/api/projects")).ShouldBeEmpty();
         (await globexAdmin.Send(HttpMethod.Get, $"/api/projects/{project.Id}")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
         (await globexAdmin.Get<List<OrganizationMemberDto>>("/api/organizations/members")).ShouldNotContain(m => m.UserId == member.UserId);
@@ -243,8 +174,8 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
     {
         var (admin, _) = await AdminAsync();
         var project = await CreateProjectAsync(admin, "COST");
-        var azure = factory.Azure.Project("COST");
-        factory.CreateRemoteRepository(azure, "web");
+        var azure = Factory.Azure.Project("COST");
+        Factory.CreateRemoteRepository(azure, "web");
         azure.AddWorkItem(301, "Dark mode", "Active", tags: "repo:web");
         await admin.Post<SyncResult>($"/api/projects/{project.Id}/azure/sync", new { });
 
@@ -269,7 +200,7 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
         azure.FileContents["/src/theme.ts"] = "export const dark = true;\nexport const contrast = 0.5;\n";
         azure.PullRequests.Add((new Application.Abstractions.AzurePullRequest(50, "Theme switch", "active", "refs/heads/feature/theme", "refs/heads/main",
             "Ayşe", DateTimeOffset.UtcNow, null, "def456", "web"), 301));
-        factory.Models.Script.Enqueue(_ => ScriptedChatClients.Text("""
+        Factory.Models.Script.Enqueue(_ => ScriptedChatClients.Text("""
             {"verdict":"request_changes","summary":"Contrast is too low.","findings":[{"file":"/src/theme.ts","line":2,"severity":"major","message":"Contrast 0.5 fails WCAG AA."}]}
             """));
         await admin.Post<SyncResult>($"/api/projects/{project.Id}/azure/sync", new { });
@@ -288,8 +219,8 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
     {
         var (admin, _) = await AdminAsync();
         var project = await CreateProjectAsync(admin, "LIMIT");
-        var azure = factory.Azure.Project("LIMIT");
-        factory.CreateRemoteRepository(azure, "ops");
+        var azure = Factory.Azure.Project("LIMIT");
+        Factory.CreateRemoteRepository(azure, "ops");
         azure.AddWorkItem(501, "Rotate logs", "Active", tags: "repo:ops");
         await admin.Post<SyncResult>($"/api/projects/{project.Id}/azure/sync", new { });
         var agent = await admin.Post<AgentDto>($"/api/projects/{project.Id}/agents", new
@@ -298,10 +229,10 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
             settings = new { maxIterations = 40, maxTokensPerRun = 25_000, maxCostPerRunUsd = 5m, timeoutMinutes = 10 },
         });
         // The model keeps asking for tools; the third call crosses 25k tokens.
-        for (var i = 0; i < 5; i++) factory.Models.Script.Enqueue(_ => ScriptedChatClients.ToolCall("list_files", new() { ["path"] = "ops" }));
+        for (var i = 0; i < 5; i++) Factory.Models.Script.Enqueue(_ => ScriptedChatClients.ToolCall("list_files", new() { ["path"] = "ops" }));
         var started = await admin.Post<JsonElement>($"/api/projects/{project.Id}/runs", new { agentId = agent.Id, workItemAzureId = 501 });
         var run = await WaitForRunAsync(admin, project.Id, r => r.Id == started.GetProperty("id").GetGuid());
-        factory.Models.Script.Clear();
+        Factory.Models.Script.Clear();
         run.Run.Status.ShouldBe(RunStatus.Failed);
         run.Run.Error.ShouldBe("Token limit exceeded (33000 > 25000)");
         run.ModelCalls.ShouldBe(3);
@@ -313,7 +244,7 @@ public sealed class PlatformTests(AppFactory factory) : IClassFixture<AppFactory
     {
         var (admin, _) = await AdminAsync();
         var project = await CreateProjectAsync(admin, "HOOK");
-        var azure = factory.Azure.Project("HOOK");
+        var azure = Factory.Azure.Project("HOOK");
         (await admin.Send(HttpMethod.Put, $"/api/projects/{project.Id}/secrets/AZURE_SERVICE_HOOK_PASSWORD", new { value = "hook-password-123" })).EnsureSuccessStatusCode();
         azure.AddWorkItem(401, "Hooked item", "New");
 

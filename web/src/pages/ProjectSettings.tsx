@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { api, fmtDate, p, type Project, type Secret } from "../api";
-import { ErrorBox, Field, Notice, useAction, useGet } from "../components/ui";
+import { api, fmtDate, p, ROLE_LABEL, type Project, type ProjectRole, type Secret, type Team, type WorkItemType } from "../api";
+import { ErrorBox, Field, FieldGroup, Notice, useAction, useGet } from "../components/ui";
 import type { ProjectPageProps } from "./ProjectShell";
 
 const KNOWN_SECRETS = [
-  { name: "AZURE_DEVOPS_PAT", label: "Azure DevOps personal access token" },
+  { name: "AZURE_DEVOPS_PAT", label: "Azure DevOps personal access token (servis kimliği)" },
+  { name: "AZURE_DEVOPS_SP_TENANT_ID", label: "Service principal: tenant id (üçü birlikte PAT'in yerine geçer)" },
+  { name: "AZURE_DEVOPS_SP_CLIENT_ID", label: "Service principal: client id" },
+  { name: "AZURE_DEVOPS_SP_CLIENT_SECRET", label: "Service principal: client secret" },
   { name: "AZURE_SERVICE_HOOK_PASSWORD", label: "Service Hook parolası" },
   { name: "ANTHROPIC_API_KEY", label: "Anthropic (Claude)" },
   { name: "OPENAI_API_KEY", label: "OpenAI" },
@@ -25,7 +28,7 @@ export function ProjectSettingsPage({ project, can }: ProjectPageProps) {
 function AzureConnection({ project }: { project: Project }) {
   const [checks, setChecks] = useState<Array<{ name: string; ok: boolean; detail: string }> | null>(null);
   const test = useAction(() => api<Array<{ name: string; ok: boolean; detail: string }>>(p(project.id, "/azure/test"), { body: {} }));
-  const sync = useAction(() => api<Record<string, number>>(p(project.id, "/azure/sync"), { body: {} }), [["project", project.id], ["work-items", project.id], ["repos", project.id], ["teams", project.id]]);
+  const sync = useAction(() => api<Record<string, number>>(p(project.id, "/azure/sync"), { body: {} }), [["project", project.id], ["work-items", project.id], ["repos", project.id], ["teams", project.id], ["people", project.id], ["members", project.id]]);
   const hookUrl = `${location.origin}/api/hooks/${project.id}`;
   return (
     <section className="card stack">
@@ -33,7 +36,7 @@ function AzureConnection({ project }: { project: Project }) {
       <ErrorBox error={test.error ?? sync.error} /><Notice text={sync.message} />
       <div className="row">
         <button disabled={test.busy} onClick={async () => setChecks((await test.run(undefined)) ?? null)}>Bağlantıyı test et</button>
-        <button className="primary" disabled={sync.busy} onClick={() => sync.run(undefined, (r) => `Senkron tamamlandı: ${r.teams} takım, ${r.repositories} repo, ${r.workItems} work item, ${r.commits} commit, ${r.pullRequests} PR, ${r.queuedRuns} yeni iş.`)}>
+        <button className="primary" disabled={sync.busy} onClick={() => sync.run(undefined, (r) => `Senkron tamamlandı: ${r.teams} takım, ${r.repositories} repo, ${r.workItems} work item, ${r.commits} commit, ${r.pullRequests} PR, ${r.queuedRuns} yeni iş; üyelik +${r.membersAdded}/−${r.membersRemoved}, ${r.invited} davet.`)}>
           {sync.busy ? "Senkronlanıyor…" : "Şimdi senkronla"}
         </button>
         <span className="small muted">Son senkron: {fmtDate(project.lastSyncedAt)}</span>
@@ -59,6 +62,14 @@ function GeneralSettings({ project, canBudget }: { project: Project; canBudget: 
     [["project", project.id], ["projects"]]);
   const s = form.settings;
   const setS = (patch: Partial<typeof s>) => setForm({ ...form, settings: { ...s, ...patch } });
+  const teams = useGet<Team[]>(["teams", project.id], p(project.id, "/teams"));
+  const types = useGet<WorkItemType[]>(["work-item-types", project.id], p(project.id, "/work-item-types"));
+  const states = [...new Set((types.data ?? []).flatMap((t) => t.states))];
+  const roles = Object.keys(ROLE_LABEL) as ProjectRole[];
+  const [group, setGroup] = useState<{ groupId: string; role: ProjectRole }>({ groupId: "", role: "Developer" });
+  const teamRole = (team: string) => s.teamRoles.find((m) => m.team.toLowerCase() === team.toLowerCase())?.role ?? "";
+  const setTeamRole = (team: string, role: ProjectRole | "") =>
+    setS({ teamRoles: [...s.teamRoles.filter((m) => m.team.toLowerCase() !== team.toLowerCase()), ...(role ? [{ team, role }] : [])] });
   return (
     <section className="card form">
       <h2>Proje ayarları</h2>
@@ -75,12 +86,39 @@ function GeneralSettings({ project, canBudget }: { project: Project; canBudget: 
       <label className="check"><input type="checkbox" checked={s.requireRunApproval} onChange={(e) => setS({ requireRunApproval: e.target.checked })} /> Her iş başlamadan önce insan onayı iste</label>
       <label className="check"><input type="checkbox" checked={s.autoReviewPullRequests} onChange={(e) => setS({ autoReviewPullRequests: e.target.checked })} /> Yeni PR'ları reviewer agent ile otomatik incele</label>
       <div className="form-2">
-        <Field label="PR açılınca work item durumu" hint="Boş = değiştirme"><input value={s.reviewState ?? ""} onChange={(e) => setS({ reviewState: e.target.value || null })} /></Field>
+        <Field label="PR açılınca work item durumu" hint={states.length ? `Bu projedeki durumlar: ${states.join(", ")} · boş = değiştirme` : "Boş = değiştirme"}>
+          <input list="wi-states" value={s.reviewState ?? ""} onChange={(e) => setS({ reviewState: e.target.value || null })} />
+          <datalist id="wi-states">{states.map((x) => <option key={x} value={x} />)}</datalist>
+        </Field>
         <Field label="Senkron aralığı (dakika)"><input type="number" min={1} max={1440} value={s.syncIntervalMinutes} onChange={(e) => setS({ syncIntervalMinutes: Number(e.target.value) })} /></Field>
       </div>
       <Field label="Kapalı durumlar" hint="Bu durumlardaki maddeler agent'a verilmez (virgülle)">
         <input value={s.closedStates.join(", ")} onChange={(e) => setS({ closedStates: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
       </Field>
+      <h3>Kişiler ve kimlik</h3>
+      <label className="check"><input type="checkbox" checked={s.autoProvisionMembers} onChange={(e) => setS({ autoProvisionMembers: e.target.checked })} /> Azure takım üyelerini her senkronda projeye ekle/çıkar (hesabı olanlar)</label>
+      <label className="check"><input type="checkbox" checked={s.autoInviteTeamMembers} onChange={(e) => setS({ autoInviteTeamMembers: e.target.checked })} /> Hesabı olmayan takım üyelerine otomatik davet oluştur (SMTP varsa e-posta gönderilir)</label>
+      <label className="check"><input type="checkbox" checked={s.requireUserCredentialForWrites} onChange={(e) => setS({ requireUserCredentialForWrites: e.target.checked })} /> Atama ve yeni madde için kişinin kendi Azure bağlantısını zorunlu kıl (servis kimliğine düşme)</label>
+      <FieldGroup label="Takım → proje rolü" hint="Hiç eşleme yoksa tüm takımlar Developer olur. Eşleme varsa yalnızca eşlenen takımlar eklenir; birden fazla takımdaki kişi en yüksek rolü alır.">
+        <table><tbody>{teams.data?.map((t) => (
+          <tr key={t.id}><td>{t.name}<div className="small muted">{t.members.length} kişi · {t.areaPaths.join(", ") || "alan yok"}</div></td>
+            <td><select aria-label={`${t.name} rolü`} value={teamRole(t.name)} onChange={(e) => setTeamRole(t.name, e.target.value as ProjectRole | "")} style={{ maxWidth: 220 }}>
+              <option value="">{s.teamRoles.length ? "Eklenmez" : "Developer (varsayılan)"}</option>
+              {roles.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+            </select></td></tr>
+        ))}</tbody></table>
+      </FieldGroup>
+      <FieldGroup label="Entra ID grubu → proje rolü" hint="Microsoft ile girişte gelen grup üyeliğine göre (grup object id).">
+        <table><tbody>{s.groupRoles.map((g) => (
+          <tr key={g.groupId}><td><code>{g.groupId}</code></td><td>{ROLE_LABEL[g.role]}</td>
+            <td className="right"><button className="danger" onClick={() => setS({ groupRoles: s.groupRoles.filter((x) => x.groupId !== g.groupId) })}>Sil</button></td></tr>
+        ))}</tbody></table>
+        <div className="row">
+          <input placeholder="Grup object id" value={group.groupId} onChange={(e) => setGroup({ ...group, groupId: e.target.value.trim() })} style={{ maxWidth: 340 }} />
+          <select value={group.role} onChange={(e) => setGroup({ ...group, role: e.target.value as ProjectRole })} style={{ maxWidth: 200 }}>{roles.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
+          <button disabled={!group.groupId} onClick={() => { setS({ groupRoles: [...s.groupRoles.filter((x) => x.groupId !== group.groupId), group] }); setGroup({ groupId: "", role: "Developer" }); }}>Ekle</button>
+        </div>
+      </FieldGroup>
       <div className="row"><span className="spacer" /><button className="primary" disabled={save.busy} onClick={() => save.run(undefined, "Ayarlar kaydedildi.")}>Kaydet</button></div>
     </section>
   );
