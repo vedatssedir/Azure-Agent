@@ -138,3 +138,11 @@ public interface IAppLinks
 {
     string InvitationUrl(string token);
 }
+
+public sealed record AgentRuntimeInfo(Domain.Agents.AgentRuntime Runtime, string Name, bool Available, string? Version, string Detail);
+
+/// <summary>Which agent runtimes this node can run (CLI agents need their executable installed).</summary>
+public interface IAgentRuntimeCatalog
+{
+    Task<IReadOnlyList<AgentRuntimeInfo>> ListAsync(CancellationToken ct);
+}

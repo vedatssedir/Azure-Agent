@@ -86,6 +86,8 @@ export type ProjectRole = "Viewer" | "Developer" | "Reviewer" | "Maintainer" | "
 export type RunStatus = "PendingApproval" | "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled";
 export type ModelProvider = "OpenAI" | "AzureOpenAI" | "Anthropic" | "Gemini";
 export type AgentKind = "Developer" | "Reviewer";
+export type AgentRuntime = "Framework" | "ClaudeCode" | "CursorCli";
+export interface AgentRuntimeInfo { runtime: AgentRuntime; name: string; available: boolean; version: string | null; detail: string }
 
 export interface AuthResult { accessToken: string; accessTokenExpiresAt: string; refreshToken: string; user: User }
 export interface User { id: string; email: string; displayName: string; isSystemAdmin: boolean; hasPassword: boolean }
@@ -130,7 +132,7 @@ export interface AgentSettings { temperature: number | null; maxIterations: numb
 export interface Agent {
   id: string; name: string; kind: AgentKind; provider: ModelProvider; model: string; instructions: string; pairedUniqueName: string | null; teamId: string | null;
   enabled: boolean; maxConcurrentRuns: number; monthlyBudgetUsd: number | null; settings: AgentSettings; skills: string[]; mcpServers: string[];
-  activeRuns: number; spentThisMonthUsd: number;
+  activeRuns: number; spentThisMonthUsd: number; runtime: AgentRuntime;
 }
 export interface RunStep { sequence: number; type: "Log" | "ModelCall" | "ToolCall" | "Git" | "Error"; title: string; detail: string | null; inputTokens: number; outputTokens: number; costUsd: number; durationMs: number; createdAt: string }
 export interface RunDetail { run: RunSummary; summary: string | null; provider: string | null; model: string | null; modelCalls: number; toolCalls: number; cachedInputTokens: number; requestedBy: string | null; approvedBy: string | null; steps: RunStep[] }

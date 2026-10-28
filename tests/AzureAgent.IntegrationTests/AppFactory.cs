@@ -44,6 +44,9 @@ public sealed class AppFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("AgentRuntime:WorkspaceRoot", Path.Combine(Root, "workspaces"));
         builder.UseSetting("Messaging:AgentWorkers", "2");
         builder.UseSetting("App:PublicUrl", "https://agent.test");
+        // CLI agents: dispatcher scripts that run whatever scenario a test installed (see SetCliScenario).
+        builder.UseSetting("AgentRuntime:ClaudeCliPath", FakeCli("claude"));
+        builder.UseSetting("AgentRuntime:CursorCliPath", FakeCli("cursor"));
         // Every test client shares one IP, so the per-IP sign-in limit is raised here.
         builder.UseSetting("RateLimits:AuthPerMinute", "10000");
         builder.ConfigureServices(services =>
@@ -58,6 +61,20 @@ public sealed class AppFactory : WebApplicationFactory<Program>, IAsyncLifetime
             services.AddSingleton<IAzureTokenProvider>(Tokens);
         });
     }
+
+    private string FakeCli(string name)
+    {
+        var dir = Directory.CreateDirectory(Path.Combine(Root, "fake-cli")).FullName;
+        var path = Path.Combine(dir, name);
+        File.WriteAllText(path, $"#!/bin/bash\nexec bash \"{Path.Combine(dir, name + ".scenario.sh")}\" \"$@\"\n");
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        SetCliScenario(name, "echo \"fake 1.0\"");
+        return path;
+    }
+
+    /// <summary>Installs the bash body the fake <c>claude</c> / <c>cursor</c> executable runs next (cwd = the run's workspace).</summary>
+    public void SetCliScenario(string name, string body) =>
+        File.WriteAllText(Path.Combine(Root, "fake-cli", name + ".scenario.sh"), "set -e\n" + body.Replace("\r", "") + "\n");
 
     public async ValueTask InitializeAsync()
     {

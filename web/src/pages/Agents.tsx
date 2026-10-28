@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, fmtUsd, p, type Agent, type AgentKind, type McpServer, type ModelProvider, type Skill, type Team } from "../api";
+import { api, fmtUsd, p, type Agent, type AgentKind, type AgentRuntime, type AgentRuntimeInfo, type McpServer, type ModelProvider, type Skill, type Team } from "../api";
 import { Drawer, ErrorBox, Field, Notice, useAction, useGet } from "../components/ui";
 import type { ProjectPageProps } from "./ProjectShell";
 
@@ -10,11 +10,37 @@ export const PROVIDERS: Record<ModelProvider, { label: string; key: string; exam
   Gemini: { label: "Google Gemini", key: "GEMINI_API_KEY", example: "gemini-2.5-pro" },
 };
 
+export const RUNTIMES: Record<AgentRuntime, { label: string; keys: string; model: string; provider?: ModelProvider }> = {
+  Framework: { label: "Microsoft Agent Framework", keys: "", model: "" },
+  ClaudeCode: { label: "Claude Code CLI", keys: "ANTHROPIC_API_KEY veya CLAUDE_CODE_OAUTH_TOKEN", model: "claude-sonnet-4-5", provider: "Anthropic" },
+  CursorCli: { label: "Cursor CLI", keys: "CURSOR_API_KEY", model: "sonnet-4.5" },
+};
+
+/** Runtime choice with what this server has installed; CLI runtimes set their provider and a model example. */
+function RuntimeField({ value, onChange }: { value: AgentRuntime; onChange: (runtime: AgentRuntime) => void }) {
+  const runtimes = useGet<AgentRuntimeInfo[]>(["agent-runtimes"], "/api/agent-runtimes");
+  const info = runtimes.data?.find((r) => r.runtime === value);
+  const hint = value === "Framework"
+    ? "Platformun araçlarıyla (list_files, read_file, run_command…) her sağlayıcı"
+    : info && !info.available ? `Uyarı: ${info.detail}. Agent worker'larına kurulmalı.`
+    : `${info?.version ?? RUNTIMES[value].label} · anahtar: ${RUNTIMES[value].keys}`;
+  return (
+    <Field label="Çalışma ortamı" hint={hint}>
+      <select value={value} onChange={(e) => onChange(e.target.value as AgentRuntime)}>
+        {(Object.keys(RUNTIMES) as AgentRuntime[]).map((r) => {
+          const available = runtimes.data?.find((x) => x.runtime === r)?.available ?? true;
+          return <option key={r} value={r}>{RUNTIMES[r].label}{available ? "" : " (kurulu değil)"}</option>;
+        })}
+      </select>
+    </Field>
+  );
+}
+
 type Draft = Omit<Agent, "id" | "skills" | "mcpServers" | "activeRuns" | "spentThisMonthUsd"> & { id?: string };
 
 const EMPTY: Draft = {
   name: "", kind: "Developer", provider: "Anthropic", model: "claude-sonnet-4-5", instructions: "", pairedUniqueName: null, teamId: null,
-  enabled: true, maxConcurrentRuns: 1, monthlyBudgetUsd: null,
+  enabled: true, maxConcurrentRuns: 1, monthlyBudgetUsd: null, runtime: "Framework",
   settings: { temperature: null, maxIterations: 40, maxTokensPerRun: 400_000, maxCostPerRunUsd: 5, timeoutMinutes: 45, endpoint: null },
 };
 
@@ -57,7 +83,7 @@ export function Agents({ project, can }: ProjectPageProps) {
           <tbody>{agents.data?.map((a) => (
             <tr key={a.id}>
               <td><strong>{a.name}</strong><div className="small muted">{a.kind === "Reviewer" ? "Code reviewer" : "Developer agent"}</div></td>
-              <td>{PROVIDERS[a.provider].label}<div className="small muted">{a.model}</div></td>
+              <td>{a.runtime === "Framework" ? PROVIDERS[a.provider].label : <span className="badge info">{RUNTIMES[a.runtime].label}</span>}<div className="small muted">{a.model}</div></td>
               <td>{a.pairedUniqueName ?? <span className="muted">—</span>}</td>
               <td><div className="row">{a.skills.map((s) => <span key={s} className="badge">{s}</span>)}{a.mcpServers.map((m) => <span key={m} className="badge info">{m}</span>)}</div></td>
               <td className="right">{fmtUsd(a.spentThisMonthUsd)}<div className="small muted">limit {fmtUsd(a.monthlyBudgetUsd)}</div></td>
@@ -100,14 +126,24 @@ function AgentEditor({ projectId, draft: initial, teams, onClose }: { projectId:
               <option value="Developer">Developer (iş yapar, PR açar)</option><option value="Reviewer">Reviewer (PR inceler)</option>
             </select>
           </Field>
-          <Field label="Sağlayıcı" hint={`Anahtar: ${PROVIDERS[draft.provider].key} (Ayarlar → Secret'lar)`}>
-            <select value={draft.provider} onChange={(e) => set("provider", e.target.value as ModelProvider)}>
-              {Object.entries(PROVIDERS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-            </select>
-          </Field>
-          <Field label="Model" hint={`Örn. ${PROVIDERS[draft.provider].example}`}><input value={draft.model} onChange={(e) => set("model", e.target.value)} /></Field>
+          <RuntimeField value={draft.runtime} onChange={(runtime) => setDraft({
+            ...draft, runtime, provider: RUNTIMES[runtime].provider ?? draft.provider, model: runtime === "Framework" ? PROVIDERS[draft.provider].example : RUNTIMES[runtime].model,
+          })} />
+          {draft.runtime === "Framework" ? (
+            <Field label="Sağlayıcı" hint={`Anahtar: ${PROVIDERS[draft.provider].key} (Ayarlar → Secret'lar)`}>
+              <select value={draft.provider} onChange={(e) => set("provider", e.target.value as ModelProvider)}>
+                {Object.entries(PROVIDERS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+            </Field>
+          ) : null}
+          <Field label="Model" hint={`Örn. ${draft.runtime === "Framework" ? PROVIDERS[draft.provider].example : RUNTIMES[draft.runtime].model}`}><input value={draft.model} onChange={(e) => set("model", e.target.value)} /></Field>
         </div>
-        {draft.provider === "AzureOpenAI" ? <Field label="Azure OpenAI endpoint" hint="https://<kaynak>.openai.azure.com"><input value={draft.settings.endpoint ?? ""} onChange={(e) => setting("endpoint", e.target.value || null)} /></Field> : null}
+        {draft.runtime !== "Framework" ? <p className="small muted">
+          CLI agent'ı klonlanan repolarda kendi araçlarıyla çalışır. Platform yine kontrol eder: repo politikasındaki komutlar dışında komut yok, git yok,
+          sunucu ortam değişkenleri ve Azure kimliği yok; commit, push ve PR'ı platform yapar; token/maliyet limitleri anlık uygulanır.
+          {draft.runtime === "CursorCli" ? " Cursor token kullanımını bildirmez; maliyet Cursor planına yansır." : ""}
+        </p> : null}
+        {draft.runtime === "Framework" && draft.provider === "AzureOpenAI" ? <Field label="Azure OpenAI endpoint" hint="https://<kaynak>.openai.azure.com"><input value={draft.settings.endpoint ?? ""} onChange={(e) => setting("endpoint", e.target.value || null)} /></Field> : null}
         {draft.kind === "Developer" ? (
           <div className="form-2">
             <Field label="Developer (Azure kullanıcı adı)" hint="Bu kişiye atanan maddeleri bu agent çalışır">
@@ -128,10 +164,10 @@ function AgentEditor({ projectId, draft: initial, teams, onClose }: { projectId:
           <Field label="Aylık bütçe (USD)" hint="Boş = limitsiz"><input type="number" min={0} step="0.01" value={draft.monthlyBudgetUsd ?? ""} onChange={(e) => set("monthlyBudgetUsd", e.target.value === "" ? null : Number(e.target.value))} /></Field>
           <Field label="İş başına en fazla maliyet (USD)"><input type="number" min={0.01} step="0.01" value={draft.settings.maxCostPerRunUsd} onChange={(e) => setting("maxCostPerRunUsd", Number(e.target.value))} /></Field>
           <Field label="İş başına en fazla token"><input type="number" min={1000} value={draft.settings.maxTokensPerRun} onChange={(e) => setting("maxTokensPerRun", Number(e.target.value))} /></Field>
-          <Field label="En fazla model/araç turu"><input type="number" min={1} max={200} value={draft.settings.maxIterations} onChange={(e) => setting("maxIterations", Number(e.target.value))} /></Field>
+          <Field label={draft.runtime === "ClaudeCode" ? "En fazla tur (--max-turns)" : "En fazla model/araç turu"}><input type="number" min={1} max={200} value={draft.settings.maxIterations} onChange={(e) => setting("maxIterations", Number(e.target.value))} /></Field>
           <Field label="Zaman aşımı (dakika)"><input type="number" min={1} max={240} value={draft.settings.timeoutMinutes} onChange={(e) => setting("timeoutMinutes", Number(e.target.value))} /></Field>
           <Field label="Eşzamanlı iş limiti"><input type="number" min={1} max={10} value={draft.maxConcurrentRuns} onChange={(e) => set("maxConcurrentRuns", Number(e.target.value))} /></Field>
-          <Field label="Temperature" hint="Boş = model varsayılanı"><input type="number" min={0} max={2} step="0.1" value={draft.settings.temperature ?? ""} onChange={(e) => setting("temperature", e.target.value === "" ? null : Number(e.target.value))} /></Field>
+          {draft.runtime === "Framework" ? <Field label="Temperature" hint="Boş = model varsayılanı"><input type="number" min={0} max={2} step="0.1" value={draft.settings.temperature ?? ""} onChange={(e) => setting("temperature", e.target.value === "" ? null : Number(e.target.value))} /></Field> : null}
         </div>
         <label className="check"><input type="checkbox" checked={draft.enabled} onChange={(e) => set("enabled", e.target.checked)} /> Aktif</label>
         <div className="row">
@@ -192,18 +228,21 @@ function SkillSuggestions({ projectId }: { projectId: string }) {
 
 function ProvisionTeam({ projectId, team, onClose }: { projectId: string; team: Team; onClose: () => void }) {
   const skills = useGet<Skill[]>(["skills"], "/api/skills");
-  const [form, setForm] = useState<{ provider: ModelProvider; model: string; skillKeys: string[] }>({ provider: "Anthropic", model: "claude-sonnet-4-5", skillKeys: [] });
+  const [form, setForm] = useState<{ provider: ModelProvider; model: string; skillKeys: string[]; runtime: AgentRuntime }>({ provider: "Anthropic", model: "claude-sonnet-4-5", skillKeys: [], runtime: "Framework" });
   const run = useAction(() => api<{ created: number }>(p(projectId, `/teams/${team.id}/provision-agents`), { body: form }), [["agents", projectId], ["teams", projectId]]);
   return (
     <Drawer title={`${team.name}: agent oluştur`} onClose={onClose}>
       <ErrorBox error={run.error} /><Notice text={run.message} />
       <p className="muted">Agent'ı olmayan {team.members.filter((m) => !m.agentId).length} üye için birer developer agent oluşturulur.</p>
       <div className="form">
-        <Field label="Sağlayıcı">
+        <RuntimeField value={form.runtime} onChange={(runtime) => setForm({
+          ...form, runtime, provider: RUNTIMES[runtime].provider ?? form.provider, model: runtime === "Framework" ? PROVIDERS[form.provider].example : RUNTIMES[runtime].model,
+        })} />
+        {form.runtime === "Framework" ? <Field label="Sağlayıcı">
           <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as ModelProvider, model: PROVIDERS[e.target.value as ModelProvider].example })}>
             {Object.entries(PROVIDERS).filter(([k]) => k !== "AzureOpenAI").map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
           </select>
-        </Field>
+        </Field> : null}
         <Field label="Model"><input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} /></Field>
         <div className="stack"><strong className="small">Skill'ler</strong>{skills.data?.map((s) => (
           <label key={s.key} className="check"><input type="checkbox" checked={form.skillKeys.includes(s.key)}

@@ -53,6 +53,38 @@ tests/
    overrides). Runs stop when token, cost-per-run or monthly budgets (organization, project, agent)
    are exceeded. Reports group cost by agent, work item, day, model or run kind.
 
+## Agent runtimes: Claude Code CLI and Cursor CLI
+
+Each agent picks a runtime (**Agents → Runtime**):
+
+| Runtime | Work loop | Credentials (secrets) | Usage and cost |
+|---|---|---|---|
+| Microsoft Agent Framework | Platform tools (`list_files`, `read_file`, `write_file`, `replace_in_file`, `search`, `run_command`) | Provider key | Every model call |
+| Claude Code CLI | `claude -p … --output-format stream-json` in the run's workspace | `CLAUDE_CODE_OAUTH_TOKEN` (subscription, `claude setup-token`) or `ANTHROPIC_API_KEY` | Every API response as it streams, priced from the model price list |
+| Cursor CLI | `cursor-agent -p … --output-format stream-json --force` | `CURSOR_API_KEY` | Not reported by Cursor (billed by the Cursor plan); duration and steps are recorded |
+
+The platform keeps control of CLI agents:
+
+- **Git stays with the platform.** The CLI gets the clones with the work branch checked out but
+  no Azure credential; the platform commits, pushes and opens the PR. A run that changes
+  `.git/config`, `.git/info/attributes` or hooks is discarded.
+- **Commands follow the repository policy.** Claude Code runs in `dontAsk` mode: only `Read`,
+  `Glob`, `Grep`, edit tools, `Bash(<allowed command>:*)` and the agent's MCP servers are
+  pre-approved; everything else (git, WebFetch, WebSearch, other shells) is denied. `--bare`
+  skips hooks and plugins a repository could bring. Cursor gets a workspace `.cursor/cli.json`
+  allowing the policy's commands and denying git, network and environment tools (Cursor's
+  `--force` approves anything not denied, so this is a deny list).
+- **No server secrets.** Child processes (git, build commands, CLIs) never inherit the server
+  environment; they see `AgentRuntime:InheritedEnvironment` (PATH, locale, proxy, CA) plus a
+  private HOME per run.
+- **Limits apply mid-run.** Token, per-run cost and monthly budget limits are checked on every
+  streamed response and stop the process; `--max-turns` and `--max-budget-usd` are passed too.
+- Reviewer agents can use a CLI runtime as well (read-only tools, no `--force`).
+
+Install the CLIs on agent workers (the Docker image includes Claude Code; build with
+`--build-arg INSTALL_CURSOR_CLI=true` for Cursor) or point `AgentRuntime__ClaudeCliPath` /
+`AgentRuntime__CursorCliPath` at them. `GET /api/agent-runtimes` shows what a node has.
+
 ## Developers and sign-in
 
 How the people of the Azure DevOps teams get onto the platform:
@@ -127,6 +159,8 @@ Production configuration (environment variables):
 | `Entra__AllowedTenantIds__0` | Required when `TenantId` is `organizations` |
 | `Smtp__Host`, `Smtp__Port`, `Smtp__Username`, `Smtp__Password`, `Smtp__From` | Invitation e-mails (optional) |
 | `RateLimits__AuthPerMinute` | Sign-in attempts per IP and minute (default 20) |
+| `AgentRuntime__ClaudeCliPath`, `AgentRuntime__CursorCliPath` | CLI executables (default `claude`, `cursor-agent`) |
+| `AgentRuntime__InheritedEnvironment__N` | Server variables child processes may see (default: PATH, locale, proxy, CA, DOTNET_ROOT, JAVA_HOME) |
 
 ## Tests
 
@@ -135,6 +169,9 @@ dotnet test --project tests/AzureAgent.UnitTests
 TEST_POSTGRES="Host=localhost;Database=azure_agent_test;Username=azure_agent;Password=azure_agent" \
   dotnet test --project tests/AzureAgent.IntegrationTests
 cd web && npm test                       # Vitest + Testing Library
+
+# Optional: the real Claude Code CLI accepts the platform's command line (no credentials used):
+AZURE_AGENT_CLI_SMOKE=1 dotnet test --project tests/AzureAgent.IntegrationTests --filter-class "AzureAgent.IntegrationTests.LiveCliTests"
 
 # Optional, read-only checks against a real Azure DevOps project:
 AZURE_DEVOPS_LIVE_PAT=... AZURE_DEVOPS_LIVE_ORG=https://dev.azure.com/<org> AZURE_DEVOPS_LIVE_PROJECT=<project> \

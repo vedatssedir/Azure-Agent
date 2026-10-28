@@ -96,6 +96,9 @@ public static class SecretNames
     public const string AzureOpenAiApiKey = "AZURE_OPENAI_API_KEY";
     public const string AnthropicApiKey = "ANTHROPIC_API_KEY";
     public const string GeminiApiKey = "GEMINI_API_KEY";
+    /// <summary>Claude Code subscription token (<c>claude setup-token</c>); used instead of ANTHROPIC_API_KEY by Claude Code agents when set.</summary>
+    public const string ClaudeCodeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN";
+    public const string CursorApiKey = "CURSOR_API_KEY";
     // Service principal (Entra ID app) used instead of the PAT when all three are set.
     public const string ServicePrincipalTenantId = "AZURE_DEVOPS_SP_TENANT_ID";
     public const string ServicePrincipalClientId = "AZURE_DEVOPS_SP_CLIENT_ID";

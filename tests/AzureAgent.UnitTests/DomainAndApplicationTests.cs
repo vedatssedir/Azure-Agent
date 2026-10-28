@@ -112,7 +112,7 @@ public sealed class WorkspaceSecurityTests : IDisposable
     [Fact]
     public void Paths_cannot_escape_the_workspace_or_reach_git_metadata()
     {
-        var tools = new WorkspaceTools(_root, new HashSet<string> { "dotnet" }, new ProcessRunner(), (_, _) => { });
+        var tools = new WorkspaceTools(_root, new HashSet<string> { "dotnet" }, new ProcessRunner(Microsoft.Extensions.Options.Options.Create(new AgentRuntimeOptions())), (_, _) => { });
         Should.Throw<InvalidOperationException>(() => tools.Resolve("../etc/passwd"));
         Should.Throw<InvalidOperationException>(() => tools.Resolve("/../../x"));
         Should.Throw<InvalidOperationException>(() => tools.Resolve("api/.git/config"));
@@ -126,7 +126,7 @@ public sealed class WorkspaceSecurityTests : IDisposable
     public async Task Only_allow_listed_commands_run_and_git_is_reserved()
     {
         Directory.CreateDirectory(Path.Combine(_root, "api"));
-        var tools = new WorkspaceTools(_root, new HashSet<string> { "echo", "git" }, new ProcessRunner(), (_, _) => { });
+        var tools = new WorkspaceTools(_root, new HashSet<string> { "echo", "git" }, new ProcessRunner(Microsoft.Extensions.Options.Options.Create(new AgentRuntimeOptions())), (_, _) => { });
         (await tools.RunCommand("api", "rm", ["-rf", "/"])).ShouldStartWith("Command 'rm' is not allowed");
         (await tools.RunCommand("api", "git", ["push"])).ShouldBe("Use of git is reserved for the platform");
         (await tools.RunCommand("api", "echo", ["hello"])).ShouldContain("hello");

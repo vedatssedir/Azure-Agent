@@ -21,6 +21,22 @@ public sealed class McpSession(IReadOnlyList<McpClient> clients, IReadOnlyList<A
 
 public sealed class McpToolLoader(IAppDbContext db, SecretResolver secrets, ILoggerFactory loggers)
 {
+    /// <summary>The agent's MCP servers with resolved secrets, for CLI agents that start the servers themselves.</summary>
+    public async Task<IReadOnlyList<CliMcpServer>> DescribeAsync(Guid projectId, Agent agent, CancellationToken ct)
+    {
+        var ids = agent.McpServers.Select(m => m.McpServerId).ToList();
+        if (ids.Count == 0) return [];
+        var result = new List<CliMcpServer>();
+        foreach (var server in await db.McpServers.AsNoTracking().Where(s => ids.Contains(s.Id)).OrderBy(s => s.Name).ToListAsync(ct))
+        {
+            var values = new Dictionary<string, string>();
+            foreach (var name in server.SecretNames)
+                if (await secrets.GetAsync(projectId, name, ct) is { } value) values[name] = value;
+            result.Add(new CliMcpServer(server.Name, server.Transport, server.Command, server.Arguments, server.Url, values));
+        }
+        return result;
+    }
+
     public async Task<McpSession> LoadAsync(Guid projectId, Agent agent, CancellationToken ct)
     {
         var ids = agent.McpServers.Select(m => m.McpServerId).ToList();

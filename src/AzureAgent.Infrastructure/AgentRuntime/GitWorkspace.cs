@@ -8,22 +8,26 @@ public sealed class GitException(string message) : Exception(message);
 /// Git operations for one run. The credential (PAT or Entra ID token) travels as an http.extraHeader
 /// in environment config (GIT_CONFIG_*), scoped to the Azure DevOps origin; it never appears in argv or remote URLs.
 /// </summary>
-public sealed class GitWorkspace(IProcessRunner processes, string organizationUrl, AzureCredential credential, string authorName, string authorEmail)
+public sealed class GitWorkspace(IProcessRunner processes, string organizationUrl, AzureCredential credential, string authorName, string authorEmail,
+    string? homeDirectory = null)
 {
     private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(10);
 
-    public IReadOnlyDictionary<string, string> Environment { get; } = BuildEnvironment(organizationUrl, credential);
+    public IReadOnlyDictionary<string, string> Environment { get; } = BuildEnvironment(organizationUrl, credential, homeDirectory);
 
-    public static IReadOnlyDictionary<string, string> BuildEnvironment(string organizationUrl, AzureCredential credential)
+    public static IReadOnlyDictionary<string, string> BuildEnvironment(string organizationUrl, AzureCredential credential, string? homeDirectory = null)
     {
         var origin = new Uri(organizationUrl).GetLeftPart(UriPartial.Authority);
         var header = $"Authorization: {credential.HeaderValue}";
-        return new Dictionary<string, string>
+        var environment = new Dictionary<string, string>
         {
             ["GIT_CONFIG_COUNT"] = "1",
             ["GIT_CONFIG_KEY_0"] = $"http.{origin}/.extraHeader",
             ["GIT_CONFIG_VALUE_0"] = header,
         };
+        // A private HOME keeps ~/.gitconfig of other runs (or the server) out.
+        if (homeDirectory is not null) environment["HOME"] = homeDirectory;
+        return environment;
     }
 
     public async Task<string> RunAsync(string directory, CancellationToken ct, params string[] args)

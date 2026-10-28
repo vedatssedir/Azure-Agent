@@ -1,3 +1,4 @@
+using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Features.Agents;
 using AzureAgent.Application.Features.Azure;
 using AzureAgent.Application.Features.Costs;
@@ -11,8 +12,8 @@ namespace AzureAgent.Api.Modules;
 public sealed class AgentsModule : ICarterModule
 {
     public sealed record SaveAgentRequest(string Name, AgentKind Kind, ModelProvider Provider, string Model, string? Instructions, string? PairedUniqueName,
-        Guid? TeamId, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd, AgentSettings? Settings);
-    public sealed record ProvisionRequest(ModelProvider Provider, string Model, IReadOnlyList<string>? SkillKeys);
+        Guid? TeamId, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd, AgentSettings? Settings, AgentRuntime Runtime = AgentRuntime.Framework);
+    public sealed record ProvisionRequest(ModelProvider Provider, string Model, IReadOnlyList<string>? SkillKeys, AgentRuntime Runtime = AgentRuntime.Framework);
     public sealed record CapabilitiesRequest(IReadOnlyList<string> SkillKeys, IReadOnlyList<string> McpServerNames);
     public sealed record StartRunRequest(Guid AgentId, int? WorkItemAzureId, Guid? PullRequestId);
     public sealed record SkillRequest(string Name, string? Description, string Content);
@@ -35,8 +36,10 @@ public sealed class AgentsModule : ICarterModule
             await bus.InvokeAsync(new SetAgentCapabilitiesCommand(projectId, agentId, r.SkillKeys, r.McpServerNames), ct);
             return Results.NoContent();
         });
+        app.MapGet("/api/agent-runtimes", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<AgentRuntimeInfo>>(new ListAgentRuntimesQuery(), ct))
+            .RequireAuthorization().WithTags("Agents");
         p.MapPost("/teams/{teamId:guid}/provision-agents", async (Guid projectId, Guid teamId, ProvisionRequest r, IMessageBus bus, CancellationToken ct) =>
-            new { created = await bus.InvokeAsync<int>(new ProvisionTeamAgentsCommand(projectId, teamId, r.Provider, r.Model, r.SkillKeys), ct) });
+            new { created = await bus.InvokeAsync<int>(new ProvisionTeamAgentsCommand(projectId, teamId, r.Provider, r.Model, r.SkillKeys, r.Runtime), ct) });
         p.MapGet("/skill-suggestions", (Guid projectId, IMessageBus bus, CancellationToken ct) =>
             bus.InvokeAsync<IReadOnlyList<SkillSuggestionDto>>(new SuggestSkillsQuery(projectId), ct));
 
@@ -89,5 +92,6 @@ public sealed class AgentsModule : ICarterModule
     }
 
     private static SaveAgentCommand ToCommand(Guid projectId, Guid? agentId, SaveAgentRequest r) =>
-        new(projectId, agentId, r.Name, r.Kind, r.Provider, r.Model, r.Instructions, r.PairedUniqueName, r.TeamId, r.Enabled, r.MaxConcurrentRuns, r.MonthlyBudgetUsd, r.Settings);
+        new(projectId, agentId, r.Name, r.Kind, r.Provider, r.Model, r.Instructions, r.PairedUniqueName, r.TeamId, r.Enabled, r.MaxConcurrentRuns, r.MonthlyBudgetUsd, r.Settings,
+            r.Runtime);
 }

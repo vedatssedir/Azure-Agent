@@ -86,6 +86,15 @@ public sealed class AgentRun : Entity, IOrganizationScoped
         ModelCalls++;
     }
 
+    /// <summary>Usage reported after the fact (a CLI's final totals) that is not a separate model call.</summary>
+    public void AddUsage(long input, long output, long cachedInput, decimal cost)
+    {
+        InputTokens += input;
+        OutputTokens += output;
+        CachedInputTokens += cachedInput;
+        CostUsd += cost;
+    }
+
     public void Succeed(DateTimeOffset now, string? summary)
     {
         if (Status != RunStatus.Running) throw new DomainException($"Run cannot succeed from {Status}");

@@ -10,10 +10,19 @@ namespace AzureAgent.Application.Features.Agents;
 
 public sealed record AgentDto(Guid Id, string Name, AgentKind Kind, ModelProvider Provider, string Model, string Instructions, string? PairedUniqueName,
     Guid? TeamId, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd, AgentSettings Settings, IReadOnlyList<string> Skills,
-    IReadOnlyList<string> McpServers, int ActiveRuns, decimal SpentThisMonthUsd);
+    IReadOnlyList<string> McpServers, int ActiveRuns, decimal SpentThisMonthUsd, AgentRuntime Runtime);
 
 public sealed record SaveAgentCommand(Guid ProjectId, Guid? AgentId, string Name, AgentKind Kind, ModelProvider Provider, string Model, string? Instructions,
-    string? PairedUniqueName, Guid? TeamId, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd, AgentSettings? Settings);
+    string? PairedUniqueName, Guid? TeamId, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd, AgentSettings? Settings,
+    AgentRuntime Runtime = AgentRuntime.Framework);
+
+internal static class RuntimeRules
+{
+    /// <summary>Claude Code runs Anthropic models; Cursor brings its own models (the provider is informational).</summary>
+    public static bool Compatible(AgentRuntime runtime, ModelProvider provider) => runtime != AgentRuntime.ClaudeCode || provider == ModelProvider.Anthropic;
+
+    public const string Message = "Claude Code agents use the Anthropic provider";
+}
 
 public sealed class SaveAgentCommandValidator : AbstractValidator<SaveAgentCommand>
 {
@@ -38,8 +47,13 @@ public sealed class SaveAgentCommandValidator : AbstractValidator<SaveAgentComma
             RuleFor(x => x.Settings!.Endpoint).Must(e => Uri.TryCreate(e, UriKind.Absolute, out var u) && u.Scheme == "https")
                 .When(x => !string.IsNullOrEmpty(x.Settings!.Endpoint)).WithMessage("Endpoint must be an https URL");
         });
-        RuleFor(x => x.Settings).Must(s => !string.IsNullOrEmpty(s?.Endpoint)).When(x => x.Provider == ModelProvider.AzureOpenAI)
+        RuleFor(x => x.Settings).Must(s => !string.IsNullOrEmpty(s?.Endpoint)).When(x => x.Provider == ModelProvider.AzureOpenAI && x.Runtime == AgentRuntime.Framework)
             .WithMessage("Azure OpenAI agents need an endpoint (Settings.Endpoint)");
+        RuleFor(x => x.Runtime).IsInEnum();
+        RuleFor(x => x).Must(x => RuntimeRules.Compatible(x.Runtime, x.Provider)).WithName("Runtime").WithMessage(RuntimeRules.Message);
+        // CLI model names go straight to --model; keep them to a plain identifier.
+        RuleFor(x => x.Model).Matches("^[A-Za-z0-9][A-Za-z0-9._:/@-]*$").When(x => x.Runtime != AgentRuntime.Framework)
+            .WithMessage("Model must be a plain model name (letters, digits, . _ - : / @)");
     }
 }
 
@@ -65,7 +79,7 @@ internal static class AgentQueries
             a.MaxConcurrentRuns, a.MonthlyBudgetUsd, a.Settings,
             a.Skills.Select(s => skills.GetValueOrDefault(s.SkillId)).OfType<string>().Order().ToList(),
             a.McpServers.Select(s => mcp.GetValueOrDefault(s.McpServerId)).OfType<string>().Order().ToList(),
-            stats.GetValueOrDefault(a.Id)?.Active ?? 0, stats.GetValueOrDefault(a.Id)?.Spent ?? 0)).ToList();
+            stats.GetValueOrDefault(a.Id)?.Active ?? 0, stats.GetValueOrDefault(a.Id)?.Spent ?? 0, a.Runtime)).ToList();
     }
 }
 
@@ -103,6 +117,7 @@ public static class SaveAgentHandler
         agent.Name = command.Name.Trim();
         agent.Kind = command.Kind;
         agent.Provider = command.Provider;
+        agent.Runtime = command.Runtime;
         agent.Model = command.Model.Trim();
         agent.Instructions = command.Instructions ?? "";
         agent.PairedUniqueName = paired;
@@ -112,7 +127,7 @@ public static class SaveAgentHandler
         agent.MonthlyBudgetUsd = command.MonthlyBudgetUsd;
         agent.Settings = command.Settings ?? agent.Settings;
         db.Audit(user, project.OrganizationId, command.AgentId is null ? "agent.created" : "agent.updated", "agent", agent.Id,
-            new { agent.Name, agent.Provider, agent.Model, agent.Enabled, agent.PairedUniqueName }, project.Id);
+            new { agent.Name, agent.Provider, agent.Runtime, agent.Model, agent.Enabled, agent.PairedUniqueName }, project.Id);
         await db.SaveChangesAsync(ct);
         var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
         await db.SaveChangesAsync(ct);
@@ -137,7 +152,8 @@ public static class DeleteAgentHandler
 }
 
 /// <summary>Creates one developer agent for every team member who does not have one.</summary>
-public sealed record ProvisionTeamAgentsCommand(Guid ProjectId, Guid TeamId, ModelProvider Provider, string Model, IReadOnlyList<string>? SkillKeys);
+public sealed record ProvisionTeamAgentsCommand(Guid ProjectId, Guid TeamId, ModelProvider Provider, string Model, IReadOnlyList<string>? SkillKeys,
+    AgentRuntime Runtime = AgentRuntime.Framework);
 
 public sealed class ProvisionTeamAgentsCommandValidator : AbstractValidator<ProvisionTeamAgentsCommand>
 {
@@ -145,6 +161,8 @@ public sealed class ProvisionTeamAgentsCommandValidator : AbstractValidator<Prov
     {
         RuleFor(x => x.Provider).IsInEnum().NotEqual(ModelProvider.AzureOpenAI).WithMessage("Provision Azure OpenAI agents individually (they need an endpoint)");
         RuleFor(x => x.Model).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.Runtime).IsInEnum();
+        RuleFor(x => x).Must(x => RuntimeRules.Compatible(x.Runtime, x.Provider)).WithName("Runtime").WithMessage(RuntimeRules.Message);
     }
 }
 
@@ -164,13 +182,13 @@ public static class ProvisionTeamAgentsHandler
             var agent = new Agent
             {
                 OrganizationId = project.OrganizationId, ProjectId = project.Id, Name = $"{member.DisplayName} (agent)", Kind = AgentKind.Developer,
-                Provider = command.Provider, Model = command.Model, PairedUniqueName = member.UniqueName, TeamId = team.Id,
+                Provider = command.Provider, Runtime = command.Runtime, Model = command.Model, PairedUniqueName = member.UniqueName, TeamId = team.Id,
             };
             agent.Skills.AddRange(skillIds.Select(id => new AgentSkill { AgentId = agent.Id, SkillId = id }));
             db.Agents.Add(agent);
             created++;
         }
-        db.Audit(user, project.OrganizationId, "agents.provisioned", "team", team.Id, new { created, command.Provider, command.Model }, project.Id);
+        db.Audit(user, project.OrganizationId, "agents.provisioned", "team", team.Id, new { created, command.Provider, command.Runtime, command.Model }, project.Id);
         await db.SaveChangesAsync(ct);
         var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
         await db.SaveChangesAsync(ct);
@@ -356,5 +374,16 @@ public static class DeleteMcpServerHandler
         db.McpServers.Remove(server);
         db.Audit(user, server.OrganizationId, "mcp_server.deleted", "mcp_server", command.Name);
         await db.SaveChangesAsync(ct);
+    }
+}
+
+public sealed record ListAgentRuntimesQuery;
+
+public static class ListAgentRuntimesHandler
+{
+    public static Task<IReadOnlyList<AgentRuntimeInfo>> Handle(ListAgentRuntimesQuery _, IAgentRuntimeCatalog catalog, AccessControl access, CancellationToken ct)
+    {
+        access.RequireUser();
+        return catalog.ListAsync(ct);
     }
 }

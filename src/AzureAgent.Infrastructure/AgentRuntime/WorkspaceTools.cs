@@ -9,7 +9,8 @@ namespace AzureAgent.Infrastructure.AgentRuntime;
 /// Tools the coding agent uses inside its run directory. Every path is resolved against the root
 /// and rejected if it escapes it; commands are limited to the repository policy's allow-list.
 /// </summary>
-public sealed class WorkspaceTools(string root, IReadOnlySet<string> allowedCommands, IProcessRunner processes, Action<string, string> onToolCall)
+public sealed class WorkspaceTools(string root, IReadOnlySet<string> allowedCommands, IProcessRunner processes, Action<string, string> onToolCall,
+    string? homeDirectory = null)
 {
     private const int MaxReadChars = 60_000;
     private static readonly string[] IgnoredDirectories = [".git", "node_modules", "bin", "obj", "dist", ".venv", "target"];
@@ -127,7 +128,8 @@ public sealed class WorkspaceTools(string root, IReadOnlySet<string> allowedComm
         onToolCall("run_command", $"{command} {string.Join(' ', arguments)}");
         if (!allowedCommands.Contains(command)) return $"Command '{command}' is not allowed. Allowed: {string.Join(", ", allowedCommands.Order())}";
         if (command == "git") return "Use of git is reserved for the platform";
-        var result = await processes.RunAsync(command, arguments, Resolve(directory), null, TimeSpan.FromMinutes(10), ct);
+        var environment = homeDirectory is null ? null : new Dictionary<string, string> { ["HOME"] = homeDirectory };
+        var result = await processes.RunAsync(command, arguments, Resolve(directory), environment, TimeSpan.FromMinutes(10), ct);
         var tail = result.Output.Length > 20_000 ? "…" + result.Output[^20_000..] : result.Output;
         return result.TimedOut ? $"Timed out after 10 minutes.\n{tail}" : $"Exit code {result.ExitCode}\n{tail}";
     }

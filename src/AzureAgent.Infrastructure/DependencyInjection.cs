@@ -77,6 +77,8 @@ public static class DependencyInjection
         services.AddSingleton<IAzureDevOpsClientFactory, AzureDevOpsClientFactory>();
         services.AddSingleton<IChatClientFactory, ChatClientFactory>();
         services.AddSingleton<IProcessRunner, ProcessRunner>();
+        services.AddSingleton<ICodingCliFactory, CodingCliFactory>();
+        services.AddSingleton<IAgentRuntimeCatalog, AgentRuntimeCatalog>();
 
         // Application services used by Wolverine handlers.
         services.AddScoped<AccessControl>();

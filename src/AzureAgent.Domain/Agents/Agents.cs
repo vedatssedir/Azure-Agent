@@ -10,6 +10,17 @@ public enum ModelProvider
     Gemini = 3,
 }
 
+/// <summary>What drives the agent's work loop.</summary>
+public enum AgentRuntime
+{
+    /// <summary>Microsoft Agent Framework with the platform's workspace tools (any provider).</summary>
+    Framework = 0,
+    /// <summary>Claude Code CLI (<c>claude -p</c>) in the run's workspace; Anthropic models.</summary>
+    ClaudeCode = 1,
+    /// <summary>Cursor CLI (<c>cursor-agent -p</c>) in the run's workspace; Cursor's models.</summary>
+    CursorCli = 2,
+}
+
 public enum AgentKind
 {
     /// <summary>Implements work items: edits code, commits, opens pull requests.</summary>
@@ -25,6 +36,7 @@ public sealed class Agent : Entity, IOrganizationScoped
     public required string Name { get; set; }
     public AgentKind Kind { get; set; }
     public ModelProvider Provider { get; set; }
+    public AgentRuntime Runtime { get; set; }
     public required string Model { get; set; }
     public string Instructions { get; set; } = "";
     /// <summary>Work items assigned to this Azure identity are handed to this agent (developer agents).</summary>

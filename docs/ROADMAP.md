@@ -28,13 +28,21 @@ Status of the platform and the next steps, in order.
 - Service principal as the service identity (sync, git, pull requests) instead of the PAT.
 - New work items from the platform (process-aware), work item types, Vitest UI tests, live Azure tests.
 
+## Done (v0.3) – CLI agents
+
+- Agent runtimes: Claude Code CLI and Cursor CLI next to Microsoft Agent Framework, for developer
+  and reviewer agents; streamed metering and limits, policy-derived permissions, git kept with the
+  platform, git metadata integrity check, runtime availability per node.
+- Child processes no longer inherit the server environment; private HOME per run.
+
 ## Next
 
 1. **Managed identity** for the service identity when hosted in Azure; Entra ID app roles.
 2. **Follow-up on PR feedback**: when reviewers comment or request changes, queue a follow-up run on
    the same branch.
 3. **Pipelines**: read build/test results of the PR (Azure Pipelines) and let the agent fix failures.
-4. **Sandboxed runners**: run agent workspaces in containers (Kubernetes jobs / ACI) with network
+4. **Sandboxed runners** (most important for CLI agents, which can reach the network through allowed
+   build tools): run agent workspaces in containers (Kubernetes jobs / ACI) with network
    policies; resource quotas per team.
 5. **Notifications**: Teams/e-mail on run failure, budget thresholds (80 %/100 %), pending approvals.
 6. **Analytics**: cost trend charts, cost per story point, success rate per agent/model, lead time

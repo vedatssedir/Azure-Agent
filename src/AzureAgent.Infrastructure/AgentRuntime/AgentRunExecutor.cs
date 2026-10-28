@@ -16,11 +16,26 @@ using Microsoft.Extensions.Options;
 
 namespace AzureAgent.Infrastructure.AgentRuntime;
 
+// The enum shares its name with this namespace.
+using AgentRuntime = AzureAgent.Domain.Agents.AgentRuntime;
+
 public sealed class AgentRuntimeOptions
 {
     public const string Section = "AgentRuntime";
     public string WorkspaceRoot { get; set; } = Path.Combine(Path.GetTempPath(), "azure-agent-workspaces");
     public bool KeepWorkspaces { get; set; }
+    /// <summary>Executable of the Claude Code CLI (npm package @anthropic-ai/claude-code).</summary>
+    public string ClaudeCliPath { get; set; } = "claude";
+    /// <summary>Executable of the Cursor CLI.</summary>
+    public string CursorCliPath { get; set; } = "cursor-agent";
+    /// <summary>Server environment variables child processes (git, build commands, CLI agents) may see. Everything else is withheld.</summary>
+    public List<string> InheritedEnvironment { get; set; } =
+    [
+        "PATH", "LANG", "LC_ALL", "TZ", "TMPDIR", "TERM",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
+        "DOTNET_ROOT", "JAVA_HOME",
+    ];
 }
 
 public sealed class RunLimitExceededException(string message) : Exception(message);
@@ -36,6 +51,7 @@ public sealed partial class AgentRunExecutor(
     IChatClientFactory chatClients,
     IProcessRunner processes,
     McpToolLoader mcpTools,
+    ICodingCliFactory cliFactory,
     IOptions<AgentRuntimeOptions> options,
     ILoggerFactory loggerFactory,
     ILogger<AgentRunExecutor> logger)
@@ -71,10 +87,13 @@ public sealed partial class AgentRunExecutor(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromMinutes(agent.Settings.TimeoutMinutes));
         var runDir = Path.Combine(options.Value.WorkspaceRoot, run.OrganizationId.ToString("N"), run.Id.ToString("N"));
+        // Private HOME for every process of the run (git, build tools, CLI agents): nothing leaks between runs or tenants.
+        var homeDir = runDir + ".home";
         try
         {
-            if (run.Kind == RunKind.Implement) await ImplementAsync(run, agent, runDir, timeout.Token);
-            else await ReviewAsync(run, agent, timeout.Token);
+            Directory.CreateDirectory(homeDir);
+            if (run.Kind == RunKind.Implement) await ImplementAsync(run, agent, runDir, homeDir, timeout.Token);
+            else await ReviewAsync(run, agent, runDir, homeDir, timeout.Token);
             run.Succeed(clock.UtcNow, run.Summary);
             await db.SaveChangesAsync(CancellationToken.None);
             logger.LogInformation("Run {RunId} succeeded: {Tokens} tokens, {Cost} USD", run.Id, run.InputTokens + run.OutputTokens, run.CostUsd);
@@ -88,6 +107,7 @@ public sealed partial class AgentRunExecutor(
         finally
         {
             if (!options.Value.KeepWorkspaces && Directory.Exists(runDir)) TryDelete(runDir);
+            if (Directory.Exists(homeDir)) TryDelete(homeDir);
         }
     }
 
@@ -101,7 +121,7 @@ public sealed partial class AgentRunExecutor(
 
     // Implement -------------------------------------------------------------------------------
 
-    private async Task ImplementAsync(AgentRun run, Agent agent, string runDir, CancellationToken ct)
+    private async Task ImplementAsync(AgentRun run, Agent agent, string runDir, string homeDir, CancellationToken ct)
     {
         var item = await db.WorkItems.AsNoTracking().FirstAsync(w => w.Id == run.WorkItemId, ct);
         var project = await db.Projects.AsNoTracking().FirstAsync(p => p.Id == run.ProjectId, ct);
@@ -119,7 +139,7 @@ public sealed partial class AgentRunExecutor(
         }
 
         var credential = await connector.ServiceCredentialAsync(project.Id, ct);
-        var git = new GitWorkspace(processes, project.AzureOrganizationUrl, credential, agent.Name, $"agent-{agent.Id:N}@azure-agent.local");
+        var git = new GitWorkspace(processes, project.AzureOrganizationUrl, credential, agent.Name, $"agent-{agent.Id:N}@azure-agent.local", homeDir);
         var branch = WorkItemMapping.BranchName(item.AzureId, item.Title);
         run.Branch = branch;
         if (repositories.SelectMany(r => r.Policy.ProtectedBranches).Any(p => BranchMatches(p, branch)))
@@ -133,9 +153,23 @@ public sealed partial class AgentRunExecutor(
         }
 
         var allowed = repositories.SelectMany(r => r.Policy.AllowedCommands).ToHashSet(StringComparer.Ordinal);
-        var tools = new WorkspaceTools(runDir, allowed, processes, (tool, detail) => run.ToolCalls++).Create();
         var prompt = ImplementationPrompt(item, repositories, branch);
-        var summary = await RunAgentAsync(run, agent, project, Instructions(agent, await SkillsAsync(agent, ct), repositories), tools, prompt, ct);
+        var instructions = Instructions(agent, await SkillsAsync(agent, ct), repositories);
+        string summary;
+        if (agent.Runtime == AgentRuntime.Framework)
+        {
+            var tools = new WorkspaceTools(runDir, allowed, processes, (tool, detail) => run.ToolCalls++, homeDir).Create();
+            summary = await RunAgentAsync(run, agent, project, instructions, tools, prompt, ct);
+        }
+        else
+        {
+            // The CLI edits the clones directly; git metadata must come out of the run exactly as it went in.
+            var gitState = repositories.ToDictionary(r => r.Name, r => GitMetadataFingerprint(Path.Combine(runDir, r.Name)));
+            summary = await RunCliAsync(run, agent, project, instructions, prompt, runDir, homeDir, allowed, readOnly: false, ct);
+            foreach (var repo in repositories)
+                if (GitMetadataFingerprint(Path.Combine(runDir, repo.Name)) != gitState[repo.Name])
+                    throw new InvalidOperationException($"The agent changed git configuration or hooks of {repo.Name}; the run was discarded");
+        }
         run.Summary = summary;
 
         var (azureProject, azure) = await connector.ConnectAsync(project.Id, ct);
@@ -211,7 +245,7 @@ public sealed partial class AgentRunExecutor(
 
     // Review ------------------------------------------------------------------------------------
 
-    private async Task ReviewAsync(AgentRun run, Agent agent, CancellationToken ct)
+    private async Task ReviewAsync(AgentRun run, Agent agent, string runDir, string homeDir, CancellationToken ct)
     {
         var pr = await db.PullRequests.FirstAsync(p => p.Id == run.PullRequestId, ct);
         var repo = await db.Repositories.AsNoTracking().FirstAsync(r => r.Id == pr.RepositoryId, ct);
@@ -242,7 +276,18 @@ public sealed partial class AgentRunExecutor(
             Report real defects (bugs, security, missing tests for changed behaviour), not style preferences.
             """);
 
-        var text = await RunAgentAsync(run, agent, project, Instructions(agent, await SkillsAsync(agent, ct), [repo]), [], builder.ToString(), ct);
+        var reviewInstructions = Instructions(agent, await SkillsAsync(agent, ct), [repo]);
+        string text;
+        if (agent.Runtime == AgentRuntime.Framework)
+        {
+            text = await RunAgentAsync(run, agent, project, reviewInstructions, [], builder.ToString(), ct);
+        }
+        else
+        {
+            // The changed files are in the prompt; the CLI runs read-only in an empty directory.
+            Directory.CreateDirectory(runDir);
+            text = await RunCliAsync(run, agent, project, reviewInstructions, builder.ToString(), runDir, homeDir, new HashSet<string>(), readOnly: true, ct);
+        }
         var review = ParseReview(text);
         foreach (var finding in review.Findings.Take(25))
         {
@@ -338,15 +383,135 @@ public sealed partial class AgentRunExecutor(
         return response.Text;
     }
 
+    // CLI agents ----------------------------------------------------------------------------------
+
+    private const int MaxCliSteps = 400;
+
+    /// <summary>
+    /// Runs a coding CLI (Claude Code / Cursor) in the workspace. Every model request is metered as it
+    /// streams; token, cost and budget limits stop the process immediately.
+    /// </summary>
+    private async Task<string> RunCliAsync(AgentRun run, Agent agent, Project project, string instructions, string prompt, string workDir, string homeDir,
+        IReadOnlySet<string> allowedCommands, bool readOnly, CancellationToken ct)
+    {
+        var cli = cliFactory.Create(agent.Runtime);
+        var credentials = new Dictionary<string, string>();
+        if (agent.Runtime == AgentRuntime.ClaudeCode)
+        {
+            if (await secrets.GetAsync(project.Id, SecretNames.ClaudeCodeOAuthToken, ct) is { Length: > 0 } oauth) credentials["CLAUDE_CODE_OAUTH_TOKEN"] = oauth;
+            else credentials["ANTHROPIC_API_KEY"] = await secrets.RequireAsync(project.Id, SecretNames.AnthropicApiKey, ct);
+        }
+        else
+        {
+            credentials["CURSOR_API_KEY"] = await secrets.RequireAsync(project.Id, SecretNames.CursorApiKey, ct);
+        }
+        var price = agent.Runtime == AgentRuntime.ClaudeCode ? await prices.FindAsync(run.OrganizationId, agent.Provider, agent.Model, ct) : null;
+        var invocation = new CliInvocation(agent.Model, workDir, homeDir, instructions, Truncate(prompt, 100_000), allowedCommands, readOnly,
+            agent.Settings.MaxIterations, Math.Max(0.01m, agent.Settings.MaxCostPerRunUsd - run.CostUsd), credentials,
+            await mcpTools.DescribeAsync(project.Id, agent, ct));
+        var (arguments, environment) = cli.Prepare(invocation);
+        await AddStepAsync(run, RunStepType.Log, $"Started {cli.DisplayName}", $"{agent.Model} · {(readOnly ? "read-only" : "commands: " + string.Join(", ", allowedCommands.Order()))}", ct: ct);
+
+        var startCost = run.CostUsd;
+        long input = 0, output = 0, cached = 0;
+        var steps = 0;
+        var lastCall = System.Diagnostics.Stopwatch.GetTimestamp();
+        CliResult? result = null;
+        string? lastText = null;
+        ProcessResult exit;
+        try
+        {
+            exit = await processes.RunStreamingAsync(cli.Executable, arguments, workDir, environment, TimeSpan.FromMinutes(agent.Settings.TimeoutMinutes), async line =>
+            {
+                foreach (var e in cli.Parse(line))
+                {
+                    switch (e)
+                    {
+                        case CliModelCall call:
+                            var cost = price?.Cost(call.InputTokens, call.OutputTokens, call.CachedInputTokens) ?? 0;
+                            run.RecordUsage(call.InputTokens, call.OutputTokens, call.CachedInputTokens, cost);
+                            (input, output, cached) = (input + call.InputTokens, output + call.OutputTokens, cached + call.CachedInputTokens);
+                            var duration = (int)System.Diagnostics.Stopwatch.GetElapsedTime(lastCall).TotalMilliseconds;
+                            lastCall = System.Diagnostics.Stopwatch.GetTimestamp();
+                            if (steps++ < MaxCliSteps)
+                                await AddStepAsync(run, RunStepType.ModelCall, $"Model call {run.ModelCalls}", null, call.InputTokens, call.OutputTokens, cost, duration, ct);
+                            await EnforceLimitsAsync(run, agent, ct);
+                            break;
+                        case CliToolUse tool:
+                            run.ToolCalls++;
+                            if (steps++ < MaxCliSteps) await AddStepAsync(run, RunStepType.ToolCall, tool.Tool, tool.Detail, ct: ct);
+                            break;
+                        case CliText text:
+                            lastText = text.Text;
+                            break;
+                        case CliResult final:
+                            result = final;
+                            break;
+                    }
+                }
+            }, ct);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            throw new InvalidOperationException($"{cli.DisplayName} is not installed on this worker ('{cli.Executable}'). Install it or set AgentRuntime:{(agent.Runtime == AgentRuntime.ClaudeCode ? "ClaudeCliPath" : "CursorCliPath")}.");
+        }
+
+        if (result is null)
+            throw new InvalidOperationException(exit.TimedOut
+                ? $"{cli.DisplayName} timed out after {agent.Settings.TimeoutMinutes} minutes"
+                : $"{cli.DisplayName} exited with code {exit.ExitCode} without a result: {Truncate(exit.Output.Trim(), 1500)}");
+        // Totals from the final event cover requests the stream did not itemize.
+        var extra = (In: Math.Max(0, (result.InputTokens ?? 0) - input), Out: Math.Max(0, (result.OutputTokens ?? 0) - output), Cached: Math.Max(0, (result.CachedInputTokens ?? 0) - cached));
+        var extraCost = price is not null ? price.Cost(extra.In, extra.Out, extra.Cached)
+            : result.CostUsd is { } reported ? Math.Max(0, reported - (run.CostUsd - startCost)) : 0;
+        if (extra.In + extra.Out > 0 || extraCost > 0) run.AddUsage(extra.In, extra.Out, extra.Cached, extraCost);
+        if (agent.Runtime == AgentRuntime.CursorCli && input + output + (result.InputTokens ?? 0) == 0)
+            await AddStepAsync(run, RunStepType.Log, "Usage not reported", "Cursor CLI does not report tokens; the cost is billed by the Cursor plan and is not in this run's total.", ct: ct);
+        await EnforceLimitsAsync(run, agent, ct);
+        if (result.IsError) throw new InvalidOperationException($"{cli.DisplayName}: {Truncate(result.Text, 2000)}");
+        if (exit.ExitCode != 0) throw new InvalidOperationException($"{cli.DisplayName} exited with code {exit.ExitCode}: {Truncate(exit.Output.Trim(), 1500)}");
+        return result.Text.Length > 0 ? result.Text : lastText ?? "";
+    }
+
+    private async Task EnforceLimitsAsync(AgentRun run, Agent agent, CancellationToken ct)
+    {
+        if (run.InputTokens + run.OutputTokens > agent.Settings.MaxTokensPerRun)
+            throw new RunLimitExceededException($"Token limit exceeded ({run.InputTokens + run.OutputTokens} > {agent.Settings.MaxTokensPerRun})");
+        if (run.CostUsd > agent.Settings.MaxCostPerRunUsd)
+            throw new RunLimitExceededException($"Cost limit exceeded ({run.CostUsd:0.0000} > {agent.Settings.MaxCostPerRunUsd} USD)");
+        if (await budgets.ExhaustedAsync(agent, ct) is { } exhausted) throw new RunLimitExceededException(exhausted);
+    }
+
+    /// <summary>Hash of a clone's git config and hooks; the platform runs git there after the agent, so these must not change.</summary>
+    public static string GitMetadataFingerprint(string repository)
+    {
+        var git = Path.Combine(repository, ".git");
+        using var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        foreach (var file in new[] { Path.Combine(git, "config"), Path.Combine(git, "info", "attributes") }
+                     .Concat(Directory.Exists(Path.Combine(git, "hooks")) ? Directory.EnumerateFiles(Path.Combine(git, "hooks"), "*", SearchOption.AllDirectories).Order() : []))
+        {
+            sha.AppendData(Encoding.UTF8.GetBytes(file));
+            if (File.Exists(file)) sha.AppendData(File.ReadAllBytes(file));
+        }
+        return Convert.ToHexString(sha.GetHashAndReset());
+    }
+
     private static string Instructions(Agent agent, IReadOnlyList<Skill> skills, IReadOnlyList<Repository> repositories)
     {
         var builder = new StringBuilder(agent.Instructions.Trim()).AppendLine().AppendLine();
         builder.AppendLine(agent.Kind == AgentKind.Developer
-            ? """
-              You are a software engineer working for the team on Azure DevOps. Use the tools to explore the code, make the change, and run the
-              repository's build and tests with run_command. Do not use git: the platform commits, pushes and opens the pull request.
-              Finish with a concise summary of what you changed and how you verified it.
-              """
+            ? agent.Runtime == AgentRuntime.Framework
+                ? """
+                  You are a software engineer working for the team on Azure DevOps. Use the tools to explore the code, make the change, and run the
+                  repository's build and tests with run_command. Do not use git: the platform commits, pushes and opens the pull request.
+                  Finish with a concise summary of what you changed and how you verified it.
+                  """
+                : """
+                  You are a software engineer working for the team on Azure DevOps. The repositories are folders of the current directory with the
+                  work branch checked out. Explore the code, make the change, and run the repository's build and tests with the allowed commands.
+                  Do not use git and do not touch .git: the platform commits, pushes and opens the pull request. You cannot ask questions; decide
+                  and note assumptions. Finish with a concise summary of what you changed and how you verified it.
+                  """
             : "You are a meticulous code reviewer. Base every finding on the code shown; cite file paths and line numbers.");
         foreach (var repo in repositories)
             builder.AppendLine($"Repository {repo.Name}: allowed commands {string.Join(", ", repo.Policy.AllowedCommands)}; at most {repo.Policy.MaxFilesChangedPerRun} changed files.");

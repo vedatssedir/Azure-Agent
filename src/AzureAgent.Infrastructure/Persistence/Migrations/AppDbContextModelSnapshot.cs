@@ -70,6 +70,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.Property<int>("Provider")
                         .HasColumnType("integer");
 
+                    b.Property<int>("Runtime")
+                        .HasColumnType("integer");
+
                     b.Property<Guid?>("TeamId")
                         .HasColumnType("uuid");
 
