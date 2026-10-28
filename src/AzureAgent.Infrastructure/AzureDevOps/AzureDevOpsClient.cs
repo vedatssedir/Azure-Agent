@@ -34,6 +34,7 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
         "System.Title", "System.State", "System.WorkItemType", "System.AssignedTo", "System.Tags", "System.AreaPath",
         "System.IterationPath", "System.Description", "System.ChangedDate", "System.Parent", "Microsoft.VSTS.Common.Priority",
         "Microsoft.VSTS.Common.AcceptanceCriteria", "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.TCM.ReproSteps",
+        "System.BoardColumn", "System.CreatedBy", "System.CreatedDate",
     ];
 
     private readonly string _base = connection.OrganizationUrl.TrimEnd('/');
@@ -83,6 +84,37 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
     public async Task<string> GetProjectNameAsync(CancellationToken ct) =>
         Str((await SendAsync(HttpMethod.Get, $"/_apis/projects/{_project}", null, ct))?["name"]);
 
+    public async Task<IReadOnlyList<AzureProject>> ListProjectsAsync(CancellationToken ct) =>
+        Values(await SendAsync(HttpMethod.Get, "/_apis/projects?$top=500&stateFilter=wellFormed", null, ct))
+            .Select(p => new AzureProject(Str(p!["id"]), Str(p["name"]), p["description"]?.GetValue<string>(), Str(p["state"]))).ToList();
+
+    public async Task<IReadOnlyList<AzureBoard>> ListBoardsAsync(string teamId, CancellationToken ct)
+    {
+        var team = Uri.EscapeDataString(teamId);
+        var boards = new List<AzureBoard>();
+        foreach (var reference in Values(await SendAsync(HttpMethod.Get, $"/{_project}/{team}/_apis/work/boards", null, ct)))
+        {
+            var board = await SendAsync(HttpMethod.Get, $"/{_project}/{team}/_apis/work/boards/{Uri.EscapeDataString(Str(reference!["id"]))}", null, ct);
+            var columns = (board?["columns"]?.AsArray() ?? []).Select(c => new AzureBoardColumn(Str(c!["name"]), Str(c["columnType"]),
+                c["itemLimit"]?.GetValue<int>() ?? 0,
+                (c["stateMappings"]?.AsObject() ?? []).ToDictionary(m => m.Key, m => m.Value?.GetValue<string>() ?? ""))).ToList();
+            boards.Add(new AzureBoard(Str(board?["name"]), board?["fields"]?["columnField"]?["referenceName"]?.GetValue<string>(), columns));
+        }
+        return boards;
+    }
+
+    public async Task<IReadOnlyList<AzureIteration>> ListIterationsAsync(string teamId, CancellationToken ct) =>
+        Values(await SendAsync(HttpMethod.Get, $"/{_project}/{Uri.EscapeDataString(teamId)}/_apis/work/teamsettings/iterations", null, ct))
+            .Select(i => new AzureIteration(Str(i!["id"]), Str(i["name"]), Str(i["path"]),
+                i["attributes"]?["startDate"]?.GetValue<string>() is { } start ? DateTimeOffset.Parse(start) : null,
+                i["attributes"]?["finishDate"]?.GetValue<string>() is { } finish ? DateTimeOffset.Parse(finish) : null,
+                i["attributes"]?["timeFrame"]?.GetValue<string>() ?? "")).ToList();
+
+    public async Task<IReadOnlyList<AzureComment>> ListWorkItemCommentsAsync(int id, CancellationToken ct) =>
+        ((await SendAsync(HttpMethod.Get, $"/{_project}/_apis/wit/workItems/{id}/comments?$top=200&order=asc", null, ct, apiVersion: "7.1-preview.4"))?["comments"]?.AsArray() ?? [])
+            .Select(c => new AzureComment(c!["id"]!.GetValue<int>(), Str(c["text"]), Str(c["createdBy"]?["displayName"]),
+                Str(c["createdBy"]?["uniqueName"]), DateTimeOffset.Parse(Str(c["createdDate"])))).ToList();
+
     public async Task<IReadOnlyList<AzureTeam>> ListTeamsAsync(CancellationToken ct) =>
         Values(await SendAsync(HttpMethod.Get, $"/_apis/projects/{_project}/teams?$top=500", null, ct))
             .Select(t => new AzureTeam(Str(t!["id"]), Str(t["name"]))).ToList();
@@ -104,8 +136,8 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
 
     public async Task<IReadOnlyList<AzureWorkItemType>> ListWorkItemTypesAsync(CancellationToken ct) =>
         Values(await SendAsync(HttpMethod.Get, $"/{_project}/_apis/wit/workitemtypes", null, ct))
-            .Where(t => t!["isDisabled"]?.GetValue<bool>() != true)
-            .Select(t => new AzureWorkItemType(Str(t!["name"]), (t["states"]?.AsArray() ?? []).Select(st => Str(st!["name"])).ToList(),
+            .Select(t => new AzureWorkItemType(Str(t!["name"]), Str(t["color"]), t["isDisabled"]?.GetValue<bool>() == true,
+                (t["states"]?.AsArray() ?? []).Select(st => new AzureWorkItemState(Str(st!["name"]), Str(st["color"]), Str(st["category"]))).ToList(),
                 (t["fields"]?.AsArray() ?? []).Select(f => Str(f!["referenceName"])).ToList())).ToList();
 
     public async Task<AzureWorkItem> CreateWorkItemAsync(string type, IReadOnlyDictionary<string, object?> fields, CancellationToken ct)
@@ -118,7 +150,7 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
     public async Task<IReadOnlyList<AzureRepository>> ListRepositoriesAsync(CancellationToken ct) =>
         Values(await SendAsync(HttpMethod.Get, $"/{_project}/_apis/git/repositories", null, ct))
             .Select(r => new AzureRepository(Str(r!["id"]), Str(r["name"]), r["defaultBranch"]?.GetValue<string>()?.Replace("refs/heads/", ""),
-                Str(r["remoteUrl"]), Str(r["webUrl"]))).ToList();
+                Str(r["remoteUrl"]), Str(r["webUrl"]), r["size"]?.GetValue<long>() ?? 0, r["isDisabled"]?.GetValue<bool>() == true)).ToList();
 
     public async Task<IReadOnlyList<string>> ListRootFilesAsync(string repository, CancellationToken ct) =>
         Values(await SendAsync(HttpMethod.Get, $"{RepoPath(repository)}/items?scopePath=%2F&recursionLevel=OneLevel", null, ct))
@@ -153,14 +185,6 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
 
     public Task AddWorkItemCommentAsync(int id, string html, CancellationToken ct) =>
         SendAsync(HttpMethod.Post, $"/{_project}/_apis/wit/workItems/{id}/comments", new { text = html }, ct, apiVersion: "7.1-preview.4");
-
-    public async Task<IReadOnlyList<AzureCommit>> ListCommitsAsync(string repository, DateTimeOffset? since, CancellationToken ct)
-    {
-        var fromDate = since is { } s ? $"&searchCriteria.fromDate={Uri.EscapeDataString(s.UtcDateTime.ToString("O"))}" : "";
-        return Values(await SendAsync(HttpMethod.Get, $"{RepoPath(repository)}/commits?searchCriteria.$top=500{fromDate}", null, ct))
-            .Select(c => new AzureCommit(Str(c!["commitId"]), Str(c["author"]?["name"]), c["author"]?["email"]?.GetValue<string>(),
-                DateTimeOffset.Parse(Str(c["author"]?["date"])), Str(c["comment"]))).ToList();
-    }
 
     private static AzurePullRequest ToPullRequest(JsonNode? p) => new(
         p!["pullRequestId"]!.GetValue<int>(), Str(p["title"]), Str(p["status"]), Str(p["sourceRefName"]), Str(p["targetRefName"]),

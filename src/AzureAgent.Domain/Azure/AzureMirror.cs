@@ -14,6 +14,45 @@ public sealed class Team : Entity, IOrganizationScoped
     public List<TeamMember> Members { get; set; } = [];
     /// <summary>Area paths owned by the team (Azure team field values), used by the team board.</summary>
     public List<TeamArea> Areas { get; set; } = [];
+    /// <summary>The team's Kanban boards (one per backlog level) with their columns as configured in Azure Boards.</summary>
+    public List<TeamBoard> Boards { get; set; } = [];
+    /// <summary>The team's sprints.</summary>
+    public List<TeamIteration> Iterations { get; set; } = [];
+}
+
+public sealed class TeamBoard
+{
+    public required string Name { get; set; }
+    /// <summary>Field that stores the board column (WEF_..._Kanban.Column); written when columns share a state.</summary>
+    public string? ColumnField { get; set; }
+    public List<BoardColumn> Columns { get; set; } = [];
+}
+
+public sealed class BoardColumn
+{
+    public required string Name { get; set; }
+    /// <summary>incoming, inProgress or outgoing.</summary>
+    public string ColumnType { get; set; } = "inProgress";
+    /// <summary>WIP limit (0 = none).</summary>
+    public int ItemLimit { get; set; }
+    public List<BoardStateMapping> StateMappings { get; set; } = [];
+}
+
+public sealed class BoardStateMapping
+{
+    public required string WorkItemType { get; set; }
+    public required string State { get; set; }
+}
+
+public sealed class TeamIteration
+{
+    public required string AzureId { get; set; }
+    public required string Name { get; set; }
+    public required string Path { get; set; }
+    public DateTimeOffset? StartDate { get; set; }
+    public DateTimeOffset? FinishDate { get; set; }
+    /// <summary>past, current or future.</summary>
+    public string TimeFrame { get; set; } = "";
 }
 
 public sealed class TeamArea
@@ -38,6 +77,11 @@ public sealed class Repository : Entity, IOrganizationScoped
     public required string RemoteUrl { get; set; }
     public required string WebUrl { get; set; }
     public RepositoryPolicy Policy { get; set; } = new();
+    public long SizeBytes { get; set; }
+    public bool IsRemoved { get; set; }
+    /// <summary>Last successful refresh of the local git mirror (code browser, history).</summary>
+    public DateTimeOffset? MirrorSyncedAt { get; set; }
+    public string? MirrorError { get; set; }
 }
 
 /// <summary>Platform rules for agents in one repository.</summary>
@@ -80,6 +124,10 @@ public sealed class WorkItem : Entity, IOrganizationScoped
     public required string State { get; set; }
     public string? AssignedToUniqueName { get; set; }
     public string? AssignedToDisplayName { get; set; }
+    /// <summary>Kanban column on the owning team's board (System.BoardColumn).</summary>
+    public string? BoardColumn { get; set; }
+    public string? CreatedByDisplayName { get; set; }
+    public DateTimeOffset? AzureCreatedAt { get; set; }
     public string? AreaPath { get; set; }
     public string? IterationPath { get; set; }
     public int? Priority { get; set; }

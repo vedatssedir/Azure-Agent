@@ -1,23 +1,31 @@
 import { useState } from "react";
-import { api, fmtDate, type AzureCredential, type Me, type Project } from "../api";
-import { ErrorBox, Field, Notice, useAction, useGet } from "../components/ui";
+import { api, fmtDate, type AzureCredential } from "../api";
+import { useApp } from "../context";
+import { ErrorBox, Field, Notice, PageHead, useAction, useGet } from "../components/ui";
 
-export function Account({ me }: { me: Me }) {
+/** The organization URL of an Azure DevOps project URL (https://dev.azure.com/org/Project → https://dev.azure.com/org). */
+const organizationUrl = (projectUrl: string) => {
+  const url = new URL(projectUrl);
+  return url.hostname === "dev.azure.com" ? `${url.origin}/${url.pathname.split("/")[1]}` : url.origin;
+};
+
+export function Account() {
+  const { me } = useApp();
   return (
     <>
-      <div className="page-head"><div><h1>Hesabım</h1><div className="subtitle">{me.user.displayName} · {me.user.email}</div></div></div>
+      <PageHead title="Hesabım" subtitle={`${me.user.displayName} · ${me.user.email}`} />
       <div className="stack">
-        <AzureConnections me={me} />
+        <AzureConnections />
         <Password hasPassword={me.user.hasPassword} />
       </div>
     </>
   );
 }
 
-function AzureConnections({ me }: { me: Me }) {
+function AzureConnections() {
   const credentials = useGet<AzureCredential[]>(["azure-credentials"], "/api/me/azure-credentials");
-  const projects = useGet<Project[]>(["projects", me.organizations[0]?.organizationId], "/api/projects");
-  const organizations = [...new Set((projects.data ?? []).map((p) => p.azureOrganizationUrl))];
+  const { projects } = useApp();
+  const organizations = [...new Set(projects.map((p) => organizationUrl(p.webUrl)))];
   const [draft, setDraft] = useState({ azureOrganizationUrl: "", personalAccessToken: "", expiresAt: "" });
   const keys = [["azure-credentials"]];
   const save = useAction(() => api<AzureCredential>("/api/me/azure-credentials/pat", {
@@ -30,7 +38,7 @@ function AzureConnections({ me }: { me: Me }) {
       <h2>Azure DevOps bağlantım</h2>
       <p className="muted small">
         Bağlı hesabınızla yaptığınız atama ve yeni madde gibi işlemler Azure'da <strong>sizin adınıza</strong> görünür ve Azure'daki kendi yetkileriniz geçerli olur.
-        Bağlantı yoksa projenin servis kimliği kullanılır (proje zorunlu kılmadıysa). Microsoft ile giriş yaptıysanız bağlantı otomatik kurulur.
+        Agent'larınız da Azure'da bu kimlikle ve sizin yetkilerinizle çalışır. Microsoft ile giriş yaptıysanız bağlantı otomatik kurulur.
       </p>
       <ErrorBox error={credentials.error ?? save.error ?? remove.error} /><Notice text={save.message} />
       {credentials.data?.length ? (
@@ -76,7 +84,7 @@ function Password({ hasPassword }: { hasPassword: boolean }) {
   const [form, setForm] = useState({ currentPassword: "", newPassword: "" });
   const change = useAction(() => api("/api/auth/change-password", { body: { currentPassword: form.currentPassword || null, newPassword: form.newPassword } }), [["me"]]);
   return (
-    <section className="card form">
+    <section className="card stack">
       <h2>{hasPassword ? "Şifre değiştir" : "Şifre belirle"}</h2>
       {!hasPassword ? <p className="muted small">Hesabınız Microsoft girişiyle açıldı. İsterseniz e-posta ile giriş için bir şifre de belirleyebilirsiniz.</p> : null}
       <ErrorBox error={change.error} /><Notice text={change.message} />

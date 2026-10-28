@@ -9,7 +9,7 @@ namespace AzureAgent.Infrastructure.Persistence;
 /// <summary>Applies migrations and seeds instance-default model prices (USD per 1M tokens).</summary>
 public sealed class DatabaseInitializer(AppDbContext db, ITenantContext tenant, ILogger<DatabaseInitializer> logger)
 {
-    // Defaults are a starting point; organizations override them under Settings → Model prices.
+    // List prices put a cost on every model call; they are not edited in the product.
     private static readonly ModelPrice[] DefaultPrices =
     [
         new() { Provider = ModelProvider.OpenAI, Model = "gpt-5", InputPerMillion = 1.25m, OutputPerMillion = 10m, CachedInputPerMillion = 0.125m },

@@ -24,9 +24,11 @@ public static partial class WorkItemMapping
         tags.Where(t => t.StartsWith("repo:", StringComparison.OrdinalIgnoreCase)).Select(t => t[5..].Trim())
             .Where(t => t.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-    public static (string? UniqueName, string? DisplayName) AssignedTo(IReadOnlyDictionary<string, object?> fields)
+    public static (string? UniqueName, string? DisplayName) AssignedTo(IReadOnlyDictionary<string, object?> fields) => Identity(fields, "System.AssignedTo");
+
+    private static (string? UniqueName, string? DisplayName) Identity(IReadOnlyDictionary<string, object?> fields, string field)
     {
-        if (!fields.TryGetValue("System.AssignedTo", out var value) || value is not JsonObject identity) return (null, null);
+        if (!fields.TryGetValue(field, out var value) || value is not JsonObject identity) return (null, null);
         return (identity["uniqueName"]?.GetValue<string>()?.ToLowerInvariant(), identity["displayName"]?.GetValue<string>());
     }
 
@@ -41,6 +43,9 @@ public static partial class WorkItemMapping
         target.State = Text(f, "System.State") is { Length: > 0 } state ? state : "New";
         target.AssignedToUniqueName = uniqueName;
         target.AssignedToDisplayName = displayName;
+        target.BoardColumn = Text(f, "System.BoardColumn") is { Length: > 0 } column ? column : null;
+        target.CreatedByDisplayName = Identity(f, "System.CreatedBy").DisplayName;
+        target.AzureCreatedAt = DateTimeOffset.TryParse(Text(f, "System.CreatedDate"), out var created) ? created : null;
         target.AreaPath = Text(f, "System.AreaPath");
         target.IterationPath = Text(f, "System.IterationPath");
         target.Priority = Number(f, "Microsoft.VSTS.Common.Priority") is { } p ? (int)p : null;
@@ -53,13 +58,22 @@ public static partial class WorkItemMapping
         target.ChangedAt = DateTimeOffset.TryParse(Text(f, "System.ChangedDate"), out var changed) ? changed : DateTimeOffset.UtcNow;
     }
 
-    /// <summary>Reconciliation query: every open item, plus anything changed since the last sync.</summary>
-    public static string ReconciliationQuery(DateTimeOffset? since, IEnumerable<string> closedStates)
+    /// <summary>
+    /// Reconciliation query: on the first sync every item that is open or changed in the last year;
+    /// afterwards everything changed since the last sync (a day of overlap).
+    /// </summary>
+    public static string ReconciliationQuery(DateTimeOffset? since, IReadOnlyCollection<string> closedStates)
     {
-        var changed = since is { } s ? $"[System.ChangedDate] >= '{s.UtcDateTime:yyyy-MM-dd}'" : "[System.ChangedDate] >= @today - 90";
-        var states = string.Join(", ", closedStates.Select(st => $"'{st.Replace("'", "''")}'"));
-        return $"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND ({changed} OR [System.State] NOT IN ({states})) ORDER BY [System.ChangedDate] DESC";
+        var open = closedStates.Count == 0 ? "" : $" OR [System.State] NOT IN ({string.Join(", ", closedStates.Select(st => $"'{st.Replace("'", "''")}'"))})";
+        var filter = since is { } s
+            ? $"[System.ChangedDate] >= '{s.UtcDateTime.AddDays(-1):yyyy-MM-dd}'"
+            : $"([System.ChangedDate] >= @today - 365{open})";
+        return $"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND {filter} ORDER BY [System.ChangedDate] DESC";
     }
+
+    /// <summary>The agent a work item asks for with an <c>agent:&lt;slug&gt;</c> tag, if any.</summary>
+    public static string? AgentTag(IEnumerable<string> tags) =>
+        tags.FirstOrDefault(t => t.StartsWith("agent:", StringComparison.OrdinalIgnoreCase))?[6..].Trim().ToLowerInvariant() is { Length: > 0 } slug ? slug : null;
 
     public static List<int> WorkItemReferences(string message) =>
         WorkItemReference().Matches(message).Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();

@@ -37,27 +37,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "McpServers",
-                schema: "app",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    OrganizationId = table.Column<Guid>(type: "uuid", nullable: false),
-                    Name = table.Column<string>(type: "text", nullable: false),
-                    Transport = table.Column<int>(type: "integer", nullable: false),
-                    Command = table.Column<string>(type: "text", nullable: true),
-                    Arguments = table.Column<List<string>>(type: "text[]", nullable: false),
-                    Url = table.Column<string>(type: "text", nullable: true),
-                    SecretNames = table.Column<List<string>>(type: "text[]", nullable: false),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_McpServers", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
                 name: "ModelPrices",
                 schema: "app",
                 columns: table => new
@@ -85,32 +64,17 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     Name = table.Column<string>(type: "text", nullable: false),
                     Slug = table.Column<string>(type: "text", nullable: false),
+                    AzureOrganizationUrl = table.Column<string>(type: "text", nullable: true),
                     MonthlyBudgetUsd = table.Column<decimal>(type: "numeric(12,2)", precision: 12, scale: 2, nullable: true),
+                    LastSyncedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    LastSyncError = table.Column<string>(type: "text", nullable: true),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Settings = table.Column<string>(type: "jsonb", nullable: false)
                 },
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_Organizations", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "Skills",
-                schema: "app",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    OrganizationId = table.Column<Guid>(type: "uuid", nullable: false),
-                    Key = table.Column<string>(type: "text", nullable: false),
-                    Name = table.Column<string>(type: "text", nullable: false),
-                    Description = table.Column<string>(type: "text", nullable: false),
-                    Content = table.Column<string>(type: "text", nullable: false),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_Skills", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -121,7 +85,7 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     Email = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
                     DisplayName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
-                    PasswordHash = table.Column<string>(type: "text", nullable: false),
+                    PasswordHash = table.Column<string>(type: "text", nullable: true),
                     IsActive = table.Column<bool>(type: "boolean", nullable: false),
                     IsSystemAdmin = table.Column<bool>(type: "boolean", nullable: false),
                     LastLoginAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
@@ -136,23 +100,57 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "Invitations",
+                schema: "app",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    OrganizationId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Email = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
+                    DisplayName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Role = table.Column<int>(type: "integer", nullable: false),
+                    TokenHash = table.Column<string>(type: "text", nullable: false),
+                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    AcceptedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    RevokedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    AcceptedByUserId = table.Column<Guid>(type: "uuid", nullable: true),
+                    InvitedBy = table.Column<string>(type: "text", nullable: false),
+                    ProjectId = table.Column<Guid>(type: "uuid", nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Invitations", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_Invitations_Organizations_OrganizationId",
+                        column: x => x.OrganizationId,
+                        principalSchema: "app",
+                        principalTable: "Organizations",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "Projects",
                 schema: "app",
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     OrganizationId = table.Column<Guid>(type: "uuid", nullable: false),
+                    AzureId = table.Column<string>(type: "text", nullable: false),
                     Name = table.Column<string>(type: "text", nullable: false),
                     Key = table.Column<string>(type: "text", nullable: false),
                     Description = table.Column<string>(type: "text", nullable: true),
                     AzureOrganizationUrl = table.Column<string>(type: "text", nullable: false),
                     AzureProjectName = table.Column<string>(type: "text", nullable: false),
                     MonthlyBudgetUsd = table.Column<decimal>(type: "numeric(12,2)", precision: 12, scale: 2, nullable: true),
+                    IsRemoved = table.Column<bool>(type: "boolean", nullable: false),
                     LastSyncedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     LastSyncError = table.Column<string>(type: "text", nullable: true),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    Settings = table.Column<string>(type: "jsonb", nullable: false)
+                    WorkItemTypes = table.Column<string>(type: "jsonb", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -162,6 +160,32 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         column: x => x.OrganizationId,
                         principalSchema: "app",
                         principalTable: "Organizations",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "ExternalLogins",
+                schema: "app",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    UserId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Provider = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
+                    Subject = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    Email = table.Column<string>(type: "text", nullable: true),
+                    LastLoginAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_ExternalLogins", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_ExternalLogins_Users_UserId",
+                        column: x => x.UserId,
+                        principalSchema: "app",
+                        principalTable: "Users",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -225,26 +249,61 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "UserAzureCredentials",
+                schema: "app",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    UserId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Kind = table.Column<int>(type: "integer", nullable: false),
+                    AzureOrganizationUrl = table.Column<string>(type: "character varying(300)", maxLength: 300, nullable: true),
+                    Ciphertext = table.Column<byte[]>(type: "bytea", nullable: false),
+                    RefreshCiphertext = table.Column<byte[]>(type: "bytea", nullable: true),
+                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    AzureUniqueName = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
+                    AzureDisplayName = table.Column<string>(type: "text", nullable: true),
+                    VerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    LastError = table.Column<string>(type: "text", nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_UserAzureCredentials", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_UserAzureCredentials_Users_UserId",
+                        column: x => x.UserId,
+                        principalSchema: "app",
+                        principalTable: "Users",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "Agents",
                 schema: "app",
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     OrganizationId = table.Column<Guid>(type: "uuid", nullable: false),
-                    ProjectId = table.Column<Guid>(type: "uuid", nullable: false),
+                    OwnerUserId = table.Column<Guid>(type: "uuid", nullable: true),
+                    ProjectId = table.Column<Guid>(type: "uuid", nullable: true),
                     Name = table.Column<string>(type: "text", nullable: false),
+                    Slug = table.Column<string>(type: "text", nullable: false),
+                    Title = table.Column<string>(type: "text", nullable: true),
                     Kind = table.Column<int>(type: "integer", nullable: false),
                     Provider = table.Column<int>(type: "integer", nullable: false),
+                    Runtime = table.Column<int>(type: "integer", nullable: false),
                     Model = table.Column<string>(type: "text", nullable: false),
                     Instructions = table.Column<string>(type: "text", nullable: false),
-                    PairedUniqueName = table.Column<string>(type: "text", nullable: true),
-                    TeamId = table.Column<Guid>(type: "uuid", nullable: true),
+                    IsDefault = table.Column<bool>(type: "boolean", nullable: false),
                     Enabled = table.Column<bool>(type: "boolean", nullable: false),
                     MaxConcurrentRuns = table.Column<int>(type: "integer", nullable: false),
                     MonthlyBudgetUsd = table.Column<decimal>(type: "numeric(12,2)", precision: 12, scale: 2, nullable: true),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    Settings = table.Column<string>(type: "jsonb", nullable: false)
+                    Settings = table.Column<string>(type: "jsonb", nullable: false),
+                    Skills = table.Column<string>(type: "jsonb", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -254,6 +313,13 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         column: x => x.ProjectId,
                         principalSchema: "app",
                         principalTable: "Projects",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.SetNull);
+                    table.ForeignKey(
+                        name: "FK_Agents_Users_OwnerUserId",
+                        column: x => x.OwnerUserId,
+                        principalSchema: "app",
+                        principalTable: "Users",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -269,6 +335,7 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     UserId = table.Column<Guid>(type: "uuid", nullable: false),
                     Role = table.Column<int>(type: "integer", nullable: false),
                     AzureUniqueName = table.Column<string>(type: "text", nullable: true),
+                    Source = table.Column<int>(type: "integer", nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
                 },
@@ -304,6 +371,10 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     DefaultBranch = table.Column<string>(type: "text", nullable: true),
                     RemoteUrl = table.Column<string>(type: "text", nullable: false),
                     WebUrl = table.Column<string>(type: "text", nullable: false),
+                    SizeBytes = table.Column<long>(type: "bigint", nullable: false),
+                    IsRemoved = table.Column<bool>(type: "boolean", nullable: false),
+                    MirrorSyncedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    MirrorError = table.Column<string>(type: "text", nullable: true),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     Policy = table.Column<string>(type: "jsonb", nullable: false)
@@ -357,6 +428,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     Name = table.Column<string>(type: "text", nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Areas = table.Column<string>(type: "jsonb", nullable: true),
+                    Boards = table.Column<string>(type: "jsonb", nullable: true),
+                    Iterations = table.Column<string>(type: "jsonb", nullable: true),
                     Members = table.Column<string>(type: "jsonb", nullable: true)
                 },
                 constraints: table =>
@@ -386,6 +460,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     State = table.Column<string>(type: "text", nullable: false),
                     AssignedToUniqueName = table.Column<string>(type: "text", nullable: true),
                     AssignedToDisplayName = table.Column<string>(type: "text", nullable: true),
+                    BoardColumn = table.Column<string>(type: "text", nullable: true),
+                    CreatedByDisplayName = table.Column<string>(type: "text", nullable: true),
+                    AzureCreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     AreaPath = table.Column<string>(type: "text", nullable: true),
                     IterationPath = table.Column<string>(type: "text", nullable: true),
                     Priority = table.Column<int>(type: "integer", nullable: true),
@@ -408,33 +485,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         column: x => x.ProjectId,
                         principalSchema: "app",
                         principalTable: "Projects",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "AgentMcpServer",
-                schema: "app",
-                columns: table => new
-                {
-                    AgentId = table.Column<Guid>(type: "uuid", nullable: false),
-                    McpServerId = table.Column<Guid>(type: "uuid", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_AgentMcpServer", x => new { x.AgentId, x.McpServerId });
-                    table.ForeignKey(
-                        name: "FK_AgentMcpServer_Agents_AgentId",
-                        column: x => x.AgentId,
-                        principalSchema: "app",
-                        principalTable: "Agents",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_AgentMcpServer_McpServers_McpServerId",
-                        column: x => x.McpServerId,
-                        principalSchema: "app",
-                        principalTable: "McpServers",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -480,33 +530,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         column: x => x.AgentId,
                         principalSchema: "app",
                         principalTable: "Agents",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "AgentSkill",
-                schema: "app",
-                columns: table => new
-                {
-                    AgentId = table.Column<Guid>(type: "uuid", nullable: false),
-                    SkillId = table.Column<Guid>(type: "uuid", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_AgentSkill", x => new { x.AgentId, x.SkillId });
-                    table.ForeignKey(
-                        name: "FK_AgentSkill_Agents_AgentId",
-                        column: x => x.AgentId,
-                        principalSchema: "app",
-                        principalTable: "Agents",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_AgentSkill_Skills_SkillId",
-                        column: x => x.SkillId,
-                        principalSchema: "app",
-                        principalTable: "Skills",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -663,12 +686,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_AgentMcpServer_McpServerId",
-                schema: "app",
-                table: "AgentMcpServer",
-                column: "McpServerId");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_AgentRuns_AgentId_CreatedAt",
                 schema: "app",
                 table: "AgentRuns",
@@ -708,18 +725,23 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_Agents_ProjectId_PairedUniqueName",
+                name: "IX_Agents_OrganizationId_Slug",
                 schema: "app",
                 table: "Agents",
-                columns: new[] { "ProjectId", "PairedUniqueName" },
-                unique: true,
-                filter: "\"PairedUniqueName\" IS NOT NULL");
+                columns: new[] { "OrganizationId", "Slug" },
+                unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_AgentSkill_SkillId",
+                name: "IX_Agents_OwnerUserId",
                 schema: "app",
-                table: "AgentSkill",
-                column: "SkillId");
+                table: "Agents",
+                column: "OwnerUserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Agents_ProjectId",
+                schema: "app",
+                table: "Agents",
+                column: "ProjectId");
 
             migrationBuilder.CreateIndex(
                 name: "IX_AuditEntries_OrganizationId_CreatedAt",
@@ -754,10 +776,29 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 .Annotation("Npgsql:IndexMethod", "gin");
 
             migrationBuilder.CreateIndex(
-                name: "IX_McpServers_OrganizationId_Name",
+                name: "IX_ExternalLogins_Provider_Subject",
                 schema: "app",
-                table: "McpServers",
-                columns: new[] { "OrganizationId", "Name" },
+                table: "ExternalLogins",
+                columns: new[] { "Provider", "Subject" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ExternalLogins_UserId",
+                schema: "app",
+                table: "ExternalLogins",
+                column: "UserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Invitations_OrganizationId_Email",
+                schema: "app",
+                table: "Invitations",
+                columns: new[] { "OrganizationId", "Email" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Invitations_TokenHash",
+                schema: "app",
+                table: "Invitations",
+                column: "TokenHash",
                 unique: true);
 
             migrationBuilder.CreateIndex(
@@ -806,6 +847,13 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 schema: "app",
                 table: "ProjectMembers",
                 column: "UserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Projects_OrganizationId_AzureId",
+                schema: "app",
+                table: "Projects",
+                columns: new[] { "OrganizationId", "AzureId" },
+                unique: true);
 
             migrationBuilder.CreateIndex(
                 name: "IX_Projects_OrganizationId_Key",
@@ -875,18 +923,19 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 column: "ProjectId");
 
             migrationBuilder.CreateIndex(
-                name: "IX_Skills_OrganizationId_Key",
-                schema: "app",
-                table: "Skills",
-                columns: new[] { "OrganizationId", "Key" },
-                unique: true);
-
-            migrationBuilder.CreateIndex(
                 name: "IX_Teams_ProjectId_AzureId",
                 schema: "app",
                 table: "Teams",
                 columns: new[] { "ProjectId", "AzureId" },
                 unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_UserAzureCredentials_UserId_Kind_AzureOrganizationUrl",
+                schema: "app",
+                table: "UserAzureCredentials",
+                columns: new[] { "UserId", "Kind", "AzureOrganizationUrl" },
+                unique: true)
+                .Annotation("Npgsql:NullsDistinct", false);
 
             migrationBuilder.CreateIndex(
                 name: "IX_Users_Email",
@@ -919,15 +968,7 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.DropTable(
-                name: "AgentMcpServer",
-                schema: "app");
-
-            migrationBuilder.DropTable(
                 name: "AgentRunSteps",
-                schema: "app");
-
-            migrationBuilder.DropTable(
-                name: "AgentSkill",
                 schema: "app");
 
             migrationBuilder.DropTable(
@@ -940,6 +981,14 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
 
             migrationBuilder.DropTable(
                 name: "Commits",
+                schema: "app");
+
+            migrationBuilder.DropTable(
+                name: "ExternalLogins",
+                schema: "app");
+
+            migrationBuilder.DropTable(
+                name: "Invitations",
                 schema: "app");
 
             migrationBuilder.DropTable(
@@ -971,11 +1020,11 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 schema: "app");
 
             migrationBuilder.DropTable(
-                name: "WorkItems",
+                name: "UserAzureCredentials",
                 schema: "app");
 
             migrationBuilder.DropTable(
-                name: "McpServers",
+                name: "WorkItems",
                 schema: "app");
 
             migrationBuilder.DropTable(
@@ -983,15 +1032,7 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                 schema: "app");
 
             migrationBuilder.DropTable(
-                name: "Skills",
-                schema: "app");
-
-            migrationBuilder.DropTable(
                 name: "PullRequests",
-                schema: "app");
-
-            migrationBuilder.DropTable(
-                name: "Users",
                 schema: "app");
 
             migrationBuilder.DropTable(
@@ -1000,6 +1041,10 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
 
             migrationBuilder.DropTable(
                 name: "Repositories",
+                schema: "app");
+
+            migrationBuilder.DropTable(
+                name: "Users",
                 schema: "app");
 
             migrationBuilder.DropTable(

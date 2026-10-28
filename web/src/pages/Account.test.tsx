@@ -3,7 +3,7 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Account } from "./Account";
 import { mockApi, renderPage } from "../test/harness";
-import { me, project } from "../test/fixtures";
+import { app, me } from "../test/fixtures";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -12,12 +12,11 @@ describe("Account → Azure DevOps connection", () => {
     let attempt = 0;
     const calls = mockApi({
       "GET /api/me/azure-credentials": () => [],
-      "GET /api/projects": () => [project],
       "PUT /api/me/azure-credentials/pat": () => (attempt++ === 0
         ? { status: 422, body: { title: "This PAT belongs to joe@contoso.com, not to your account (vedat@contoso.com)" } }
         : { id: "c-1", kind: "PersonalAccessToken", azureOrganizationUrl: "https://dev.azure.com/contoso", azureUniqueName: "vedat@contoso.com", azureDisplayName: "Vedat", verifiedAt: "", expiresAt: null, lastError: null }),
     });
-    renderPage(<Account me={me} />);
+    renderPage(<Account />);
     await screen.findByRole("option", { name: "https://dev.azure.com/contoso" });
     const pat = screen.getByLabelText(/^PAT/);
     await userEvent.type(pat, "abcdefghijklmnopqrstuvwxyz012345");
@@ -33,8 +32,8 @@ describe("Account → Azure DevOps connection", () => {
   });
 
   it("lets password-less (Microsoft) accounts set a password without the current one", async () => {
-    const calls = mockApi({ "GET /api/me/azure-credentials": () => [], "GET /api/projects": () => [], "POST /api/auth/change-password": () => ({ status: 204 }) });
-    renderPage(<Account me={{ ...me, user: { ...me.user, hasPassword: false } }} />);
+    const calls = mockApi({ "GET /api/me/azure-credentials": () => [], "POST /api/auth/change-password": () => ({ status: 204 }) });
+    renderPage(<Account />, { app: { ...app, me: { ...me, user: { ...me.user, hasPassword: false } } } });
     expect(await screen.findByRole("heading", { name: "Şifre belirle" })).toBeTruthy();
     expect(screen.queryByLabelText("Mevcut şifre")).toBeNull();
     await userEvent.type(screen.getByLabelText(/Yeni şifre/), "Sup3rSecretPass");

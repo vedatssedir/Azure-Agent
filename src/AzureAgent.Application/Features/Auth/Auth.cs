@@ -1,6 +1,7 @@
 using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Common;
 using AzureAgent.Application.Features.Identity;
+using AzureAgent.Application.Features.Secrets;
 using AzureAgent.Domain.Identity;
 using FluentValidation;
 using Microsoft.EntityFrameworkCore;
@@ -29,8 +30,11 @@ internal static class AuthIssuer
 
 // Setup -----------------------------------------------------------------------------
 
-/// <summary>First-run bootstrap: creates the system administrator and the first organization.</summary>
-public sealed record SetupCommand(string Email, string DisplayName, string Password, string OrganizationName, string? Ip = null);
+/// <summary>
+/// First-run bootstrap: the administrator account plus the Azure DevOps organization (URL + PAT).
+/// The PAT is verified, then everything in the organization is synced in the background.
+/// </summary>
+public sealed record SetupCommand(string Email, string DisplayName, string Password, string AzureOrganizationUrl, string PersonalAccessToken, string? Ip = null);
 
 public sealed class SetupCommandValidator : AbstractValidator<SetupCommand>
 {
@@ -39,7 +43,8 @@ public sealed class SetupCommandValidator : AbstractValidator<SetupCommand>
         RuleFor(x => x.Email).NotEmpty().EmailAddress().MaximumLength(256);
         RuleFor(x => x.DisplayName).NotEmpty().MaximumLength(100);
         RuleFor(x => x.Password).SetValidator(new PasswordValidator());
-        RuleFor(x => x.OrganizationName).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.AzureOrganizationUrl).SetValidator(new Projects.AzureUrlValidator());
+        RuleFor(x => x.PersonalAccessToken).NotEmpty().Length(20, 500).Matches("^[A-Za-z0-9]+$").WithMessage("A PAT contains letters and digits only");
     }
 }
 
@@ -56,10 +61,15 @@ public sealed class PasswordValidator : AbstractValidator<string>
 
 public static class SetupHandler
 {
-    public static async Task<AuthResult> Handle(SetupCommand command, IAppDbContext db, IPasswordHasher hasher, ITokenService tokens,
-        IClock clock, ITenantContext tenant, CancellationToken ct)
+    public static async Task<(AuthResult, IEnumerable<object>)> Handle(SetupCommand command, IAppDbContext db, IPasswordHasher hasher, ITokenService tokens,
+        IClock clock, ITenantContext tenant, IAzureDevOpsClientFactory factory, SecretResolver secrets, ISecretProtector protector, CancellationToken ct)
     {
         if (await db.Users.AnyAsync(ct)) throw new ConflictException("Setup has already been completed");
+        var url = command.AzureOrganizationUrl.Trim().TrimEnd('/');
+        var credential = AzureCredential.Pat(command.PersonalAccessToken.Trim());
+        await Settings.AzureVerification.RequireAccessAsync(factory, url, credential, ct);
+        var identity = await factory.Create(new AzureConnectionInfo(url, "", credential)).GetAuthenticatedIdentityAsync(ct);
+
         var user = new User
         {
             Email = command.Email.Trim().ToLowerInvariant(),
@@ -67,16 +77,47 @@ public static class SetupHandler
             PasswordHash = hasher.Hash(command.Password),
             IsSystemAdmin = true,
         };
-        var organization = new Organization { Name = command.OrganizationName.Trim(), Slug = Slugs.From(command.OrganizationName) };
+        var name = url.Split('/', StringSplitOptions.RemoveEmptyEntries)[^1];
+        name = name.EndsWith(".visualstudio.com", StringComparison.OrdinalIgnoreCase) ? name.Split('.')[0] : name;
+        var organization = new Organization { Name = name, Slug = Slugs.From(name), AzureOrganizationUrl = url };
         tenant.Use(organization.Id);
         db.Users.Add(user);
         db.Organizations.Add(organization);
         db.OrganizationMembers.Add(new OrganizationMember { OrganizationId = organization.Id, UserId = user.Id, Role = OrganizationRole.Owner });
+        await secrets.SetOrganizationAsync(organization.Id, Domain.Projects.SecretNames.AzureDevOpsPat, credential.Token, ct);
+        // The administrator's own PAT also acts for them personally (writes show their name in Azure).
+        if (identity.UniqueName.Equals(user.Email, StringComparison.OrdinalIgnoreCase))
+        {
+            db.UserAzureCredentials.Add(new UserAzureCredential
+            {
+                UserId = user.Id, Kind = AzureCredentialKind.PersonalAccessToken, AzureOrganizationUrl = Identity.UserAzureCredentials.NormalizeUrl(url),
+                Ciphertext = protector.Protect(credential.Token), AzureUniqueName = user.Email, AzureDisplayName = identity.DisplayName, VerifiedAt = clock.UtcNow,
+            });
+        }
         db.AuditEntries.Add(new Domain.Auditing.AuditEntry
         {
             OrganizationId = organization.Id, Actor = user.Email, Action = "setup.completed", EntityType = "organization", EntityId = organization.Id.ToString(),
+            Details = System.Text.Json.JsonSerializer.Serialize(new { url }),
         });
-        return await AuthIssuer.IssueAsync(user, db, tokens, clock, command.Ip, ct);
+        var result = await AuthIssuer.IssueAsync(user, db, tokens, clock, command.Ip, ct);
+        return (result, [new Azure.SyncOrganization(organization.Id, "setup")]);
+    }
+}
+
+/// <summary>Whether first-run setup is still open (no users yet).</summary>
+public sealed record GetSetupStatusQuery;
+
+public sealed record SetupStatusDto(bool SetupRequired, bool SelfSignUp);
+
+public static class GetSetupStatusHandler
+{
+    public static async Task<SetupStatusDto> Handle(GetSetupStatusQuery _, IAppDbContext db, ITenantContext tenant, CancellationToken ct)
+    {
+        tenant.UseAllOrganizations();
+        var required = !await db.Users.AnyAsync(ct);
+        var selfSignUp = !required && (await db.Organizations.AsNoTracking().Where(o => o.AzureOrganizationUrl != null).Select(o => o.Settings).ToListAsync(ct))
+            .Any(s => s.AllowSelfSignUp);
+        return new SetupStatusDto(required, selfSignUp);
     }
 }
 

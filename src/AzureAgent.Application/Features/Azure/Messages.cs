@@ -2,6 +2,9 @@ namespace AzureAgent.Application.Features.Azure;
 
 // Messages carry the organization id so handlers can scope their unit of work to the tenant.
 
+/// <summary>Reconciles the organization's project list, then queues a sync of every project.</summary>
+public sealed record SyncOrganization(Guid OrganizationId, string Trigger);
+
 /// <summary>Full reconciliation of one project with Azure DevOps.</summary>
 public sealed record SyncProject(Guid OrganizationId, Guid ProjectId, string Trigger);
 
@@ -13,3 +16,5 @@ public sealed record ExecuteAgentRun(Guid OrganizationId, Guid RunId);
 
 public sealed record SyncResult(int Teams, int Repositories, int WorkItems, int Commits, int PullRequests, int QueuedRuns,
     int MembersAdded = 0, int MembersRemoved = 0, int Invited = 0);
+
+public sealed record OrganizationSyncResult(int Projects, int Added, int Removed);

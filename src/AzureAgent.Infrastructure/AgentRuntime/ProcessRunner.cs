@@ -6,6 +6,9 @@ namespace AzureAgent.Infrastructure.AgentRuntime;
 
 public sealed record ProcessResult(int ExitCode, string Output, bool TimedOut);
 
+/// <summary>Exact stdout bytes (up to a cap) and stderr text of a process.</summary>
+public sealed record CapturedOutput(int ExitCode, byte[] Stdout, bool Truncated, string Stderr);
+
 public interface IProcessRunner
 {
     Task<ProcessResult> RunAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory, IReadOnlyDictionary<string, string>? environment,
@@ -17,6 +20,10 @@ public interface IProcessRunner
     /// </summary>
     Task<ProcessResult> RunStreamingAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory,
         IReadOnlyDictionary<string, string>? environment, TimeSpan timeout, Func<string, Task> onOutputLine, CancellationToken ct);
+
+    /// <summary>Captures stdout exactly (binary safe) up to <paramref name="maxBytes"/>; a longer output is cut and the process stopped.</summary>
+    Task<CapturedOutput> CaptureAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory,
+        IReadOnlyDictionary<string, string>? environment, TimeSpan timeout, int maxBytes, CancellationToken ct);
 }
 
 /// <summary>
@@ -57,6 +64,41 @@ public sealed class ProcessRunner(IOptions<AgentRuntimeOptions> options) : IProc
     public Task<ProcessResult> RunStreamingAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory,
         IReadOnlyDictionary<string, string>? environment, TimeSpan timeout, Func<string, Task> onOutputLine, CancellationToken ct) =>
         RunCoreAsync(StartInfo(fileName, arguments, workingDirectory, environment), timeout, onOutputLine, ct);
+
+    public async Task<CapturedOutput> CaptureAsync(string fileName, IReadOnlyList<string> arguments, string workingDirectory,
+        IReadOnlyDictionary<string, string>? environment, TimeSpan timeout, int maxBytes, CancellationToken ct)
+    {
+        using var process = new Process { StartInfo = StartInfo(fileName, arguments, workingDirectory, environment) };
+        var stderr = new StringBuilder();
+        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (stderr) { if (stderr.Length < 16_000) stderr.AppendLine(e.Data); } };
+        process.Start();
+        process.StandardInput.Close();
+        process.BeginErrorReadLine();
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(timeout);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81_920];
+        var truncated = false;
+        try
+        {
+            var stdout = process.StandardOutput.BaseStream;
+            int read;
+            while ((read = await stdout.ReadAsync(chunk, timeoutCts.Token)) > 0)
+            {
+                var room = maxBytes - (int)buffer.Length;
+                buffer.Write(chunk, 0, Math.Min(read, room));
+                if (read > room) { truncated = true; Kill(process); break; }
+            }
+            await process.WaitForExitAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Kill(process);
+            ct.ThrowIfCancellationRequested();
+            throw new TimeoutException($"{fileName} did not finish within {timeout}");
+        }
+        return new CapturedOutput(truncated ? 0 : process.ExitCode, buffer.ToArray(), truncated, stderr.ToString());
+    }
 
     private static async Task<ProcessResult> RunCoreAsync(ProcessStartInfo info, TimeSpan timeout, Func<string, Task>? onOutputLine, CancellationToken ct)
     {

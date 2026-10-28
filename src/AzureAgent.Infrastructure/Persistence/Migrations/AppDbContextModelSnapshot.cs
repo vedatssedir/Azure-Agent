@@ -40,6 +40,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<bool>("IsDefault")
+                        .HasColumnType("boolean");
+
                     b.Property<int>("Kind")
                         .HasColumnType("integer");
 
@@ -61,10 +64,10 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("OrganizationId")
                         .HasColumnType("uuid");
 
-                    b.Property<string>("PairedUniqueName")
-                        .HasColumnType("text");
+                    b.Property<Guid?>("OwnerUserId")
+                        .HasColumnType("uuid");
 
-                    b.Property<Guid>("ProjectId")
+                    b.Property<Guid?>("ProjectId")
                         .HasColumnType("uuid");
 
                     b.Property<int>("Provider")
@@ -73,34 +76,26 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.Property<int>("Runtime")
                         .HasColumnType("integer");
 
-                    b.Property<Guid?>("TeamId")
-                        .HasColumnType("uuid");
+                    b.Property<string>("Slug")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Title")
+                        .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ProjectId", "PairedUniqueName")
-                        .IsUnique()
-                        .HasFilter("\"PairedUniqueName\" IS NOT NULL");
+                    b.HasIndex("OwnerUserId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("OrganizationId", "Slug")
+                        .IsUnique();
 
                     b.ToTable("Agents", "app");
-                });
-
-            modelBuilder.Entity("AzureAgent.Domain.Agents.AgentMcpServer", b =>
-                {
-                    b.Property<Guid>("AgentId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("McpServerId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("AgentId", "McpServerId");
-
-                    b.HasIndex("McpServerId");
-
-                    b.ToTable("AgentMcpServer", "app");
                 });
 
             modelBuilder.Entity("AzureAgent.Domain.Agents.AgentRun", b =>
@@ -258,21 +253,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("AgentRunSteps", "app");
                 });
 
-            modelBuilder.Entity("AzureAgent.Domain.Agents.AgentSkill", b =>
-                {
-                    b.Property<Guid>("AgentId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("SkillId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("AgentId", "SkillId");
-
-                    b.HasIndex("SkillId");
-
-                    b.ToTable("AgentSkill", "app");
-                });
-
             modelBuilder.Entity("AzureAgent.Domain.Agents.CodeReview", b =>
                 {
                     b.Property<Guid>("Id")
@@ -310,89 +290,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("PullRequestId");
 
                     b.ToTable("CodeReviews", "app");
-                });
-
-            modelBuilder.Entity("AzureAgent.Domain.Agents.McpServer", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.PrimitiveCollection<List<string>>("Arguments")
-                        .IsRequired()
-                        .HasColumnType("text[]");
-
-                    b.Property<string>("Command")
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<Guid>("OrganizationId")
-                        .HasColumnType("uuid");
-
-                    b.PrimitiveCollection<List<string>>("SecretNames")
-                        .IsRequired()
-                        .HasColumnType("text[]");
-
-                    b.Property<int>("Transport")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Url")
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OrganizationId", "Name")
-                        .IsUnique();
-
-                    b.ToTable("McpServers", "app");
-                });
-
-            modelBuilder.Entity("AzureAgent.Domain.Agents.Skill", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Content")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Key")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<Guid>("OrganizationId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OrganizationId", "Key")
-                        .IsUnique();
-
-                    b.ToTable("Skills", "app");
                 });
 
             modelBuilder.Entity("AzureAgent.Domain.Auditing.AuditEntry", b =>
@@ -585,6 +482,15 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.Property<string>("DefaultBranch")
                         .HasColumnType("text");
 
+                    b.Property<bool>("IsRemoved")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("MirrorError")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("MirrorSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
@@ -598,6 +504,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.Property<string>("RemoteUrl")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -708,14 +617,23 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.Property<string>("AssignedToUniqueName")
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset?>("AzureCreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<int>("AzureId")
                         .HasColumnType("integer");
+
+                    b.Property<string>("BoardColumn")
+                        .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("ChangedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedByDisplayName")
+                        .HasColumnType("text");
 
                     b.Property<string>("Description")
                         .IsRequired()
@@ -933,7 +851,16 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AzureOrganizationUrl")
+                        .HasColumnType("text");
+
                     b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastSyncError")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("LastSyncedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<decimal?>("MonthlyBudgetUsd")
@@ -1141,6 +1068,10 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AzureId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<string>("AzureOrganizationUrl")
                         .IsRequired()
                         .HasColumnType("text");
@@ -1154,6 +1085,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("Description")
                         .HasColumnType("text");
+
+                    b.Property<bool>("IsRemoved")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Key")
                         .IsRequired()
@@ -1180,6 +1114,9 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "AzureId")
+                        .IsUnique();
 
                     b.HasIndex("OrganizationId", "Key")
                         .IsUnique();
@@ -1269,11 +1206,15 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("AzureAgent.Domain.Agents.Agent", b =>
                 {
+                    b.HasOne("AzureAgent.Domain.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerUserId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
                     b.HasOne("AzureAgent.Domain.Projects.Project", null)
                         .WithMany()
                         .HasForeignKey("ProjectId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.SetNull);
 
                     b.OwnsOne("AzureAgent.Domain.Agents.AgentSettings", "Settings", b1 =>
                         {
@@ -1304,23 +1245,37 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                                 .HasForeignKey("AgentId");
                         });
 
+                    b.OwnsMany("AzureAgent.Domain.Agents.AgentSkill", "Skills", b1 =>
+                        {
+                            b1.Property<Guid>("AgentId");
+
+                            b1.Property<int>("__synthesizedOrdinal")
+                                .ValueGeneratedOnAdd();
+
+                            b1.Property<string>("Content")
+                                .IsRequired();
+
+                            b1.Property<bool>("Enabled");
+
+                            b1.Property<string>("Name")
+                                .IsRequired();
+
+                            b1.HasKey("AgentId", "__synthesizedOrdinal");
+
+                            b1.ToTable("Agents", "app");
+
+                            b1
+                                .ToJson("Skills")
+                                .HasColumnType("jsonb");
+
+                            b1.WithOwner()
+                                .HasForeignKey("AgentId");
+                        });
+
                     b.Navigation("Settings")
                         .IsRequired();
-                });
 
-            modelBuilder.Entity("AzureAgent.Domain.Agents.AgentMcpServer", b =>
-                {
-                    b.HasOne("AzureAgent.Domain.Agents.Agent", null)
-                        .WithMany("McpServers")
-                        .HasForeignKey("AgentId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("AzureAgent.Domain.Agents.McpServer", null)
-                        .WithMany()
-                        .HasForeignKey("McpServerId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                    b.Navigation("Skills");
                 });
 
             modelBuilder.Entity("AzureAgent.Domain.Agents.AgentRun", b =>
@@ -1337,21 +1292,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("AzureAgent.Domain.Agents.AgentRun", null)
                         .WithMany()
                         .HasForeignKey("RunId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("AzureAgent.Domain.Agents.AgentSkill", b =>
-                {
-                    b.HasOne("AzureAgent.Domain.Agents.Agent", null)
-                        .WithMany("Skills")
-                        .HasForeignKey("AgentId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("AzureAgent.Domain.Agents.Skill", null)
-                        .WithMany()
-                        .HasForeignKey("SkillId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -1496,6 +1436,119 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                                 .HasForeignKey("TeamId");
                         });
 
+                    b.OwnsMany("AzureAgent.Domain.Azure.TeamBoard", "Boards", b1 =>
+                        {
+                            b1.Property<Guid>("TeamId");
+
+                            b1.Property<int>("__synthesizedOrdinal")
+                                .ValueGeneratedOnAdd();
+
+                            b1.Property<string>("ColumnField");
+
+                            b1.Property<string>("Name")
+                                .IsRequired();
+
+                            b1.HasKey("TeamId", "__synthesizedOrdinal");
+
+                            b1.ToTable("Teams", "app");
+
+                            b1
+                                .ToJson("Boards")
+                                .HasColumnType("jsonb");
+
+                            b1.WithOwner()
+                                .HasForeignKey("TeamId");
+
+                            b1.OwnsMany("AzureAgent.Domain.Azure.BoardColumn", "Columns", b2 =>
+                                {
+                                    b2.Property<Guid>("TeamBoardTeamId");
+
+                                    b2.Property<int>("TeamBoard__synthesizedOrdinal");
+
+                                    b2.Property<int>("__synthesizedOrdinal")
+                                        .ValueGeneratedOnAdd();
+
+                                    b2.Property<string>("ColumnType")
+                                        .IsRequired();
+
+                                    b2.Property<int>("ItemLimit");
+
+                                    b2.Property<string>("Name")
+                                        .IsRequired();
+
+                                    b2.HasKey("TeamBoardTeamId", "TeamBoard__synthesizedOrdinal", "__synthesizedOrdinal");
+
+                                    b2.ToTable("Teams", "app");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("TeamBoardTeamId", "TeamBoard__synthesizedOrdinal");
+
+                                    b2.OwnsMany("AzureAgent.Domain.Azure.BoardStateMapping", "StateMappings", b3 =>
+                                        {
+                                            b3.Property<Guid>("BoardColumnTeamBoardTeamId");
+
+                                            b3.Property<int>("BoardColumnTeamBoard__synthesizedOrdinal");
+
+                                            b3.Property<int>("BoardColumn__synthesizedOrdinal");
+
+                                            b3.Property<int>("__synthesizedOrdinal")
+                                                .ValueGeneratedOnAdd();
+
+                                            b3.Property<string>("State")
+                                                .IsRequired();
+
+                                            b3.Property<string>("WorkItemType")
+                                                .IsRequired();
+
+                                            b3.HasKey("BoardColumnTeamBoardTeamId", "BoardColumnTeamBoard__synthesizedOrdinal", "BoardColumn__synthesizedOrdinal", "__synthesizedOrdinal");
+
+                                            b3.ToTable("Teams", "app");
+
+                                            b3.WithOwner()
+                                                .HasForeignKey("BoardColumnTeamBoardTeamId", "BoardColumnTeamBoard__synthesizedOrdinal", "BoardColumn__synthesizedOrdinal");
+                                        });
+
+                                    b2.Navigation("StateMappings");
+                                });
+
+                            b1.Navigation("Columns");
+                        });
+
+                    b.OwnsMany("AzureAgent.Domain.Azure.TeamIteration", "Iterations", b1 =>
+                        {
+                            b1.Property<Guid>("TeamId");
+
+                            b1.Property<int>("__synthesizedOrdinal")
+                                .ValueGeneratedOnAdd();
+
+                            b1.Property<string>("AzureId")
+                                .IsRequired();
+
+                            b1.Property<DateTimeOffset?>("FinishDate");
+
+                            b1.Property<string>("Name")
+                                .IsRequired();
+
+                            b1.Property<string>("Path")
+                                .IsRequired();
+
+                            b1.Property<DateTimeOffset?>("StartDate");
+
+                            b1.Property<string>("TimeFrame")
+                                .IsRequired();
+
+                            b1.HasKey("TeamId", "__synthesizedOrdinal");
+
+                            b1.ToTable("Teams", "app");
+
+                            b1
+                                .ToJson("Iterations")
+                                .HasColumnType("jsonb");
+
+                            b1.WithOwner()
+                                .HasForeignKey("TeamId");
+                        });
+
                     b.OwnsMany("AzureAgent.Domain.Azure.TeamMember", "Members", b1 =>
                         {
                             b1.Property<Guid>("TeamId");
@@ -1522,6 +1575,10 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         });
 
                     b.Navigation("Areas");
+
+                    b.Navigation("Boards");
+
+                    b.Navigation("Iterations");
 
                     b.Navigation("Members");
                 });
@@ -1550,6 +1607,101 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("OrganizationId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AzureAgent.Domain.Identity.Organization", b =>
+                {
+                    b.OwnsOne("AzureAgent.Domain.Projects.OrganizationSettings", "Settings", b1 =>
+                        {
+                            b1.Property<Guid>("OrganizationId");
+
+                            b1.Property<bool>("AllowSelfSignUp");
+
+                            b1.Property<bool>("AutoDispatch");
+
+                            b1.Property<bool>("AutoInviteTeamMembers");
+
+                            b1.Property<bool>("AutoProvisionMembers");
+
+                            b1.Property<bool>("AutoReviewPullRequests");
+
+                            b1.Property<string>("AzureOpenAiEndpoint");
+
+                            b1.Property<bool>("CreateDefaultAgentForDevelopers");
+
+                            b1.Property<string>("DefaultModel")
+                                .IsRequired();
+
+                            b1.Property<int>("DefaultProvider");
+
+                            b1.Property<int>("DefaultRuntime");
+
+                            b1.Property<bool>("RequireRunApproval");
+
+                            b1.Property<bool>("RequireUserCredentialForWrites");
+
+                            b1.Property<int>("SyncIntervalMinutes");
+
+                            b1.Property<bool>("UpdateWorkItemState");
+
+                            b1.HasKey("OrganizationId");
+
+                            b1.ToTable("Organizations", "app");
+
+                            b1
+                                .ToJson("Settings")
+                                .HasColumnType("jsonb");
+
+                            b1.WithOwner()
+                                .HasForeignKey("OrganizationId");
+
+                            b1.OwnsMany("AzureAgent.Domain.Projects.GroupRoleMapping", "GroupRoles", b2 =>
+                                {
+                                    b2.Property<Guid>("OrganizationSettingsOrganizationId");
+
+                                    b2.Property<int>("__synthesizedOrdinal")
+                                        .ValueGeneratedOnAdd();
+
+                                    b2.Property<string>("GroupId")
+                                        .IsRequired();
+
+                                    b2.Property<int>("Role");
+
+                                    b2.HasKey("OrganizationSettingsOrganizationId", "__synthesizedOrdinal");
+
+                                    b2.ToTable("Organizations", "app");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("OrganizationSettingsOrganizationId");
+                                });
+
+                            b1.OwnsMany("AzureAgent.Domain.Projects.TeamRoleMapping", "TeamRoles", b2 =>
+                                {
+                                    b2.Property<Guid>("OrganizationSettingsOrganizationId");
+
+                                    b2.Property<int>("__synthesizedOrdinal")
+                                        .ValueGeneratedOnAdd();
+
+                                    b2.Property<int>("Role");
+
+                                    b2.Property<string>("Team")
+                                        .IsRequired();
+
+                                    b2.HasKey("OrganizationSettingsOrganizationId", "__synthesizedOrdinal");
+
+                                    b2.ToTable("Organizations", "app");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("OrganizationSettingsOrganizationId");
+                                });
+
+                            b1.Navigation("GroupRoles");
+
+                            b1.Navigation("TeamRoles");
+                        });
+
+                    b.Navigation("Settings")
                         .IsRequired();
                 });
 
@@ -1596,87 +1748,65 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.OwnsOne("AzureAgent.Domain.Projects.ProjectSettings", "Settings", b1 =>
+                    b.OwnsMany("AzureAgent.Domain.Projects.WorkItemTypeInfo", "WorkItemTypes", b1 =>
                         {
                             b1.Property<Guid>("ProjectId");
 
-                            b1.Property<bool>("AutoDispatch");
+                            b1.Property<int>("__synthesizedOrdinal")
+                                .ValueGeneratedOnAdd();
 
-                            b1.Property<bool>("AutoInviteTeamMembers");
-
-                            b1.Property<bool>("AutoProvisionMembers");
-
-                            b1.Property<bool>("AutoReviewPullRequests");
-
-                            b1.PrimitiveCollection<string>("ClosedStates")
+                            b1.Property<string>("Color")
                                 .IsRequired();
 
-                            b1.Property<bool>("RequireRunApproval");
+                            b1.PrimitiveCollection<string>("Fields")
+                                .IsRequired();
 
-                            b1.Property<bool>("RequireUserCredentialForWrites");
+                            b1.Property<bool>("IsDisabled");
 
-                            b1.Property<string>("ReviewState");
+                            b1.Property<string>("Name")
+                                .IsRequired();
 
-                            b1.Property<int>("SyncIntervalMinutes");
-
-                            b1.HasKey("ProjectId");
+                            b1.HasKey("ProjectId", "__synthesizedOrdinal");
 
                             b1.ToTable("Projects", "app");
 
                             b1
-                                .ToJson("Settings")
+                                .ToJson("WorkItemTypes")
                                 .HasColumnType("jsonb");
 
                             b1.WithOwner()
                                 .HasForeignKey("ProjectId");
 
-                            b1.OwnsMany("AzureAgent.Domain.Projects.GroupRoleMapping", "GroupRoles", b2 =>
+                            b1.OwnsMany("AzureAgent.Domain.Projects.WorkItemStateInfo", "States", b2 =>
                                 {
-                                    b2.Property<Guid>("ProjectSettingsProjectId");
+                                    b2.Property<Guid>("WorkItemTypeInfoProjectId");
+
+                                    b2.Property<int>("WorkItemTypeInfo__synthesizedOrdinal");
 
                                     b2.Property<int>("__synthesizedOrdinal")
                                         .ValueGeneratedOnAdd();
 
-                                    b2.Property<string>("GroupId")
+                                    b2.Property<string>("Category")
                                         .IsRequired();
 
-                                    b2.Property<int>("Role");
+                                    b2.Property<string>("Color")
+                                        .IsRequired();
 
-                                    b2.HasKey("ProjectSettingsProjectId", "__synthesizedOrdinal");
+                                    b2.Property<string>("Name")
+                                        .IsRequired();
+
+                                    b2.HasKey("WorkItemTypeInfoProjectId", "WorkItemTypeInfo__synthesizedOrdinal", "__synthesizedOrdinal");
 
                                     b2.ToTable("Projects", "app");
 
                                     b2.WithOwner()
-                                        .HasForeignKey("ProjectSettingsProjectId");
+                                        .HasForeignKey("WorkItemTypeInfoProjectId", "WorkItemTypeInfo__synthesizedOrdinal");
                                 });
 
-                            b1.OwnsMany("AzureAgent.Domain.Projects.TeamRoleMapping", "TeamRoles", b2 =>
-                                {
-                                    b2.Property<Guid>("ProjectSettingsProjectId");
-
-                                    b2.Property<int>("__synthesizedOrdinal")
-                                        .ValueGeneratedOnAdd();
-
-                                    b2.Property<int>("Role");
-
-                                    b2.Property<string>("Team")
-                                        .IsRequired();
-
-                                    b2.HasKey("ProjectSettingsProjectId", "__synthesizedOrdinal");
-
-                                    b2.ToTable("Projects", "app");
-
-                                    b2.WithOwner()
-                                        .HasForeignKey("ProjectSettingsProjectId");
-                                });
-
-                            b1.Navigation("GroupRoles");
-
-                            b1.Navigation("TeamRoles");
+                            b1.Navigation("States");
                         });
 
-                    b.Navigation("Settings")
-                        .IsRequired();
+                    b.Navigation("WorkItemTypes");
                 });
 
             modelBuilder.Entity("AzureAgent.Domain.Projects.ProjectMember", b =>
@@ -1702,13 +1832,6 @@ namespace AzureAgent.Infrastructure.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Cascade);
-                });
-
-            modelBuilder.Entity("AzureAgent.Domain.Agents.Agent", b =>
-                {
-                    b.Navigation("McpServers");
-
-                    b.Navigation("Skills");
                 });
 #pragma warning restore 612, 618
         }

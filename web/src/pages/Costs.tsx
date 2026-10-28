@@ -1,68 +1,71 @@
-import { useState } from "react";
-import { fmtTokens, fmtUsd, p, type BudgetLine, type CostReport } from "../api";
-import { ErrorBox, Stat, UsageBar, useGet } from "../components/ui";
-import type { ProjectPageProps } from "./ProjectShell";
+import { useSearchParams } from "react-router-dom";
+import { fmtTokens, fmtUsd, qs, type BudgetLine, type CostReport } from "../api";
+import { useApp } from "../context";
+import { Empty, ErrorBox, Loading, PageHead, Stat, UsageBar, useGet } from "../components/ui";
 
-const GROUPS = { Agent: "Agent", WorkItem: "Work item", Day: "Gün", Model: "Model", Kind: "İş türü" } as const;
-const RANGES = { 7: "Son 7 gün", 30: "Son 30 gün", 90: "Son 90 gün" } as const;
+const GROUPS: Array<[string, string]> = [["Agent", "Agent"], ["Developer", "Developer"], ["Project", "Proje"], ["WorkItem", "Work item"], ["Day", "Gün"], ["Model", "Model"], ["Kind", "İş türü"]];
 
-export function Costs({ project }: ProjectPageProps) {
-  const [groupBy, setGroupBy] = useState<keyof typeof GROUPS>("Agent");
-  const [days, setDays] = useState<7 | 30 | 90>(30);
+/** What the agents cost, per job; model prices are built in and not edited. */
+export function Costs() {
+  const { isAdmin, projects } = useApp();
+  const [params, setParams] = useSearchParams();
+  const groupBy = params.get("group") ?? "Agent";
+  const days = Number(params.get("days") ?? 30);
+  const project = params.get("project") ?? "";
+  const set = (key: string, value: string) => { const next = new URLSearchParams(params); if (value) next.set(key, value); else next.delete(key); setParams(next); };
   const from = new Date(Date.now() - days * 86_400_000).toISOString();
-  const report = useGet<CostReport>(["costs", project.id, groupBy, days], p(project.id, `/costs?groupBy=${groupBy}&from=${encodeURIComponent(from)}`));
-  const budgets = useGet<BudgetLine[]>(["budgets", project.id], p(project.id, "/budgets"));
+  const report = useGet<CostReport>(["costs", groupBy, days, project], `/api/costs${qs({ groupBy, from, project })}`);
+  const budgets = useGet<BudgetLine[]>(["budgets"], isAdmin ? "/api/costs/budgets" : null);
   const r = report.data;
-  const max = Math.max(...(r?.rows.map((row) => row.costUsd) ?? [0]), 0.000001);
   return (
-    <div className="stack">
-      <div className="row">
-        {Object.entries(RANGES).map(([k, v]) => <button key={k} className={days === Number(k) ? "primary" : ""} onClick={() => setDays(Number(k) as 7 | 30 | 90)}>{v}</button>)}
-        <span className="spacer" />
-        <span className="small muted">Grupla:</span>
-        {Object.entries(GROUPS).map(([k, v]) => <button key={k} className={groupBy === k ? "primary" : ""} onClick={() => setGroupBy(k as keyof typeof GROUPS)}>{v}</button>)}
+    <>
+      <PageHead title="Maliyet" subtitle="Model çağrıları liste fiyatlarıyla hesaplanır; iş başına maliyet ve bütçe kullanımı." />
+      <div className="toolbar">
+        <select aria-label="Dönem" value={days} onChange={(e) => set("days", e.target.value)}>
+          <option value={7}>Son 7 gün</option><option value={30}>Son 30 gün</option><option value={90}>Son 90 gün</option><option value={365}>Son 1 yıl</option>
+        </select>
+        <select aria-label="Proje" value={project} onChange={(e) => set("project", e.target.value)}>
+          <option value="">Tüm projeler</option>{projects.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+        </select>
+        <div className="row">{GROUPS.map(([key, label]) => <button key={key} className={groupBy === key ? "primary small" : "small"} onClick={() => set("group", key)}>{label}</button>)}</div>
       </div>
-      <ErrorBox error={report.error ?? budgets.error} />
-      {r ? (
-        <div className="stats">
+      <ErrorBox error={report.error} />
+      {report.isLoading ? <Loading /> : r ? <>
+        <div className="stats" style={{ marginBottom: 16 }}>
           <Stat label="Toplam maliyet" value={fmtUsd(r.totalCostUsd)} />
-          <Stat label="İş sayısı" value={r.totalRuns} />
-          <Stat label="Başarılı iş başına maliyet" value={fmtUsd(r.costPerSucceededRunUsd, 4)} />
-          <Stat label="Toplam token" value={fmtTokens(r.totalTokens)} />
+          <Stat label="Çalıştırma" value={r.totalRuns} />
+          <Stat label="Başarılı iş başına" value={fmtUsd(r.costPerSucceededRunUsd)} />
+          <Stat label="Token" value={fmtTokens(r.totalTokens)} />
         </div>
-      ) : null}
-      <section className="card">
-        <h2>{GROUPS[groupBy]} bazında</h2>
-        <table>
-          <thead><tr><th>{GROUPS[groupBy]}</th><th className="right">İş</th><th className="right">Başarılı</th><th className="right">Token</th><th className="right">Ort. iş maliyeti</th><th className="right">Ort. süre</th><th className="right">Maliyet</th><th style={{ width: "18%" }} /></tr></thead>
-          <tbody>
-            {r?.rows.length === 0 ? <tr><td colSpan={8} className="muted">Bu aralıkta agent çalışması yok.</td></tr> : null}
-            {r?.rows.map((row) => (
-              <tr key={row.key}>
-                <td>{row.label}</td>
-                <td className="right">{row.runs}</td>
-                <td className="right">{row.succeededRuns}</td>
-                <td className="right">{fmtTokens(row.inputTokens + row.outputTokens)}</td>
-                <td className="right">{fmtUsd(row.averageCostPerRunUsd, 4)}</td>
-                <td className="right">{row.averageDurationMinutes} dk</td>
-                <td className="right"><strong>{fmtUsd(row.costUsd, 4)}</strong></td>
-                <td><div className="bar"><span style={{ width: `${(row.costUsd / max) * 100}%` }} /></div></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-      <section className="card">
+        {r.rows.length === 0 ? <Empty>Bu dönemde çalıştırma yok.</Empty> : (
+          <div className="table-card" style={{ marginBottom: 24 }}>
+            <table>
+              <thead><tr><th>{GROUPS.find(([k]) => k === groupBy)?.[1]}</th><th className="right">Çalıştırma</th><th className="right">Başarılı</th><th className="right">Token</th>
+                <th className="right">Maliyet</th><th className="right">Ortalama / iş</th><th className="right">Ort. süre</th><th style={{ width: 140 }} /></tr></thead>
+              <tbody>{r.rows.map((row) => (
+                <tr key={row.key}>
+                  <td>{row.label}</td><td className="right">{row.runs}</td><td className="right">{row.succeededRuns}</td>
+                  <td className="right">{fmtTokens(row.inputTokens + row.outputTokens)}</td><td className="right"><strong>{fmtUsd(row.costUsd)}</strong></td>
+                  <td className="right">{fmtUsd(row.averageCostPerRunUsd)}</td><td className="right">{row.averageDurationMinutes} dk</td>
+                  <td><UsageBar percent={r.totalCostUsd > 0 ? Math.round((row.costUsd / r.totalCostUsd) * 1000) / 10 : 0} /></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </> : null}
+      {budgets.data ? <>
         <h2>Bu ayın bütçeleri</h2>
-        <p className="muted small">Herhangi bir limit dolduğunda ilgili agent'ların yeni işleri ve devam eden model çağrıları durdurulur.</p>
-        <table><tbody>{budgets.data?.map((b) => (
-          <tr key={`${b.scope}-${b.name}`}>
-            <td><span className="badge">{b.scope === "organization" ? "Organizasyon" : b.scope === "project" ? "Proje" : "Agent"}</span> {b.name}</td>
-            <td className="right">{fmtUsd(b.spentUsd)} / {fmtUsd(b.limitUsd)}</td>
-            <td style={{ width: "30%" }}><UsageBar percent={b.usedPercent} /></td>
-          </tr>
-        ))}</tbody></table>
-      </section>
-    </div>
+        <div className="table-card">
+          <table>
+            <thead><tr><th>Kapsam</th><th>Ad</th><th className="right">Harcanan</th><th className="right">Limit</th><th style={{ width: 180 }}>Kullanım</th></tr></thead>
+            <tbody>{budgets.data.filter((b) => b.scope !== "agent" || b.spentUsd > 0 || b.limitUsd).map((b, i) => (
+              <tr key={i}><td className="muted">{b.scope === "organization" ? "Organizasyon" : b.scope === "project" ? "Proje" : "Agent"}</td><td>{b.name}</td>
+                <td className="right">{fmtUsd(b.spentUsd)}</td><td className="right">{b.limitUsd ? fmtUsd(b.limitUsd, 0) : "—"}</td><td><UsageBar percent={b.usedPercent} /></td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </> : null}
+    </>
   );
 }

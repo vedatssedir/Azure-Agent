@@ -2,89 +2,109 @@ using AzureAgent.Application.Abstractions;
 using AzureAgent.Application.Common;
 using AzureAgent.Application.Features.Azure;
 using AzureAgent.Domain.Agents;
+using AzureAgent.Domain.Identity;
 using AzureAgent.Domain.Projects;
 using FluentValidation;
 using Microsoft.EntityFrameworkCore;
 
 namespace AzureAgent.Application.Features.Runs;
 
-public sealed record ListRunsQuery(Guid ProjectId, RunStatus? Status, Guid? AgentId, int Take = 200);
+internal static class RunAccess
+{
+    /// <summary>Projects whose runs the caller may see.</summary>
+    public static async Task<List<Guid>> VisibleProjectsAsync(IAppDbContext db, AccessControl access, CancellationToken ct)
+    {
+        var visible = new List<Guid>();
+        foreach (var id in await db.Projects.AsNoTracking().Select(p => p.Id).ToListAsync(ct))
+            if ((await access.PermissionsAsync(id, null, ct)).Contains(Permission.AgentsView)) visible.Add(id);
+        return visible;
+    }
+
+    public static async Task<AgentRun> RequireAsync(IAppDbContext db, AccessControl access, Guid runId, string permission, CancellationToken ct, bool tracking = false)
+    {
+        var runs = tracking ? db.AgentRuns : db.AgentRuns.AsNoTracking();
+        var run = await runs.FirstOrDefaultAsync(r => r.Id == runId, ct) ?? throw new NotFoundException("Run");
+        await access.RequireAsync(run.ProjectId, permission, ct);
+        return run;
+    }
+}
+
+public sealed record ListRunsQuery(Guid? ProjectId, RunStatus? Status, Guid? AgentId, bool Mine = false, int Take = 200);
 
 public static class ListRunsHandler
 {
-    public static async Task<IReadOnlyList<RunSummaryDto>> Handle(ListRunsQuery query, IAppDbContext db, AccessControl access, CancellationToken ct)
+    public static async Task<IReadOnlyList<RunSummaryDto>> Handle(ListRunsQuery query, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
     {
-        await access.RequireAsync(query.ProjectId, Permission.AgentsView, ct);
+        var userId = access.RequireUser();
+        access.RequireOrganization();
+        var projects = await RunAccess.VisibleProjectsAsync(db, access, ct);
+        if (query.ProjectId is { } projectId) projects = projects.Where(p => p == projectId).ToList();
+        var mine = db.Agents.Where(a => a.OwnerUserId == userId).Select(a => a.Id);
         return await db.AgentRuns.AsNoTracking()
-            .Where(r => r.ProjectId == query.ProjectId && (query.Status == null || r.Status == query.Status) && (query.AgentId == null || r.AgentId == query.AgentId))
+            .Where(r => projects.Contains(r.ProjectId) && (query.Status == null || r.Status == query.Status) && (query.AgentId == null || r.AgentId == query.AgentId))
+            .Where(r => !query.Mine || mine.Contains(r.AgentId))
             .OrderByDescending(r => r.CreatedAt).Take(Math.Clamp(query.Take, 1, 500))
-            .Join(db.Agents, r => r.AgentId, a => a.Id, (r, a) => new RunSummaryDto(r.Id, r.Kind, r.Status, a.Name, r.WorkItemAzureId, r.Branch,
-                r.PullRequestUrls, r.Error, r.InputTokens, r.OutputTokens, r.CostUsd, r.CreatedAt, r.StartedAt, r.FinishedAt))
-            .ToListAsync(ct);
+            .RunSummaries(db).ToListAsync(ct);
     }
 }
 
 public sealed record RunStepDto(int Sequence, RunStepType Type, string Title, string? Detail, long InputTokens, long OutputTokens, decimal CostUsd, int DurationMs,
     DateTimeOffset CreatedAt);
 
-public sealed record RunDetailDto(RunSummaryDto Run, string? Summary, string? Provider, string? Model, int ModelCalls, int ToolCalls, long CachedInputTokens,
-    string? RequestedBy, string? ApprovedBy, IReadOnlyList<RunStepDto> Steps);
+public sealed record RunDetailDto(RunSummaryDto Run, string ProjectName, string? WorkItemTitle, string? Summary, string? Provider, string? Model, int ModelCalls,
+    int ToolCalls, long CachedInputTokens, string? RequestedBy, string? ApprovedBy, IReadOnlyList<RunStepDto> Steps);
 
-public sealed record GetRunQuery(Guid ProjectId, Guid RunId);
+public sealed record GetRunQuery(Guid RunId);
 
 public static class GetRunHandler
 {
     public static async Task<RunDetailDto> Handle(GetRunQuery query, IAppDbContext db, AccessControl access, CancellationToken ct)
     {
-        await access.RequireAsync(query.ProjectId, Permission.AgentsView, ct);
-        var run = await db.AgentRuns.AsNoTracking().FirstOrDefaultAsync(r => r.Id == query.RunId && r.ProjectId == query.ProjectId, ct) ?? throw new NotFoundException("Run");
-        var agent = await db.Agents.AsNoTracking().Where(a => a.Id == run.AgentId).Select(a => a.Name).FirstAsync(ct);
+        var run = await RunAccess.RequireAsync(db, access, query.RunId, Permission.AgentsView, ct);
+        var summary = await db.AgentRuns.AsNoTracking().Where(r => r.Id == run.Id).RunSummaries(db).SingleAsync(ct);
+        var project = await db.Projects.AsNoTracking().Where(p => p.Id == run.ProjectId).Select(p => p.Name).FirstAsync(ct);
+        var title = run.WorkItemId is { } itemId ? await db.WorkItems.AsNoTracking().Where(w => w.Id == itemId).Select(w => w.Title).FirstOrDefaultAsync(ct) : null;
         var steps = await db.AgentRunSteps.AsNoTracking().Where(s => s.RunId == run.Id).OrderBy(s => s.Sequence)
             .Select(s => new RunStepDto(s.Sequence, s.Type, s.Title, s.Detail, s.InputTokens, s.OutputTokens, s.CostUsd, s.DurationMs, s.CreatedAt)).ToListAsync(ct);
-        return new RunDetailDto(
-            new RunSummaryDto(run.Id, run.Kind, run.Status, agent, run.WorkItemAzureId, run.Branch, run.PullRequestUrls, run.Error, run.InputTokens,
-                run.OutputTokens, run.CostUsd, run.CreatedAt, run.StartedAt, run.FinishedAt),
-            run.Summary, run.Provider, run.Model, run.ModelCalls, run.ToolCalls, run.CachedInputTokens, run.RequestedBy, run.ApprovedBy, steps);
+        return new RunDetailDto(summary, project, title, run.Summary, run.Provider, run.Model, run.ModelCalls, run.ToolCalls, run.CachedInputTokens, run.RequestedBy,
+            run.ApprovedBy, steps);
     }
 }
 
-public sealed record ApproveRunCommand(Guid ProjectId, Guid RunId);
+public sealed record ApproveRunCommand(Guid RunId);
 
 public static class ApproveRunHandler
 {
     public static async Task<ExecuteAgentRun> Handle(ApproveRunCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
     {
-        await access.RequireAsync(command.ProjectId, Permission.AgentsRun, ct);
-        var run = await db.AgentRuns.FirstOrDefaultAsync(r => r.Id == command.RunId && r.ProjectId == command.ProjectId, ct) ?? throw new NotFoundException("Run");
-        try { run.Approve(user.ActorName); } catch (Domain.Common.DomainException e) { throw new ConflictException(e.Message); }
+        var run = await RunAccess.RequireAsync(db, access, command.RunId, Permission.AgentsRun, ct, tracking: true);
+        run.Approve(user.ActorName);
         db.Audit(user, run.OrganizationId, "run.approved", "run", run.Id, null, run.ProjectId);
         await db.SaveChangesAsync(ct);
         return new ExecuteAgentRun(run.OrganizationId, run.Id);
     }
 }
 
-public sealed record CancelRunCommand(Guid ProjectId, Guid RunId);
+public sealed record CancelRunCommand(Guid RunId);
 
 public static class CancelRunHandler
 {
     public static async Task Handle(CancelRunCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, IClock clock, CancellationToken ct)
     {
-        await access.RequireAsync(command.ProjectId, Permission.AgentsRun, ct);
-        var run = await db.AgentRuns.FirstOrDefaultAsync(r => r.Id == command.RunId && r.ProjectId == command.ProjectId, ct) ?? throw new NotFoundException("Run");
-        try { run.Cancel(clock.UtcNow); } catch (Domain.Common.DomainException e) { throw new ConflictException(e.Message); }
+        var run = await RunAccess.RequireAsync(db, access, command.RunId, Permission.AgentsRun, ct, tracking: true);
+        run.Cancel(clock.UtcNow);
         db.Audit(user, run.OrganizationId, "run.cancelled", "run", run.Id, null, run.ProjectId);
         await db.SaveChangesAsync(ct);
     }
 }
 
-public sealed record RetryRunCommand(Guid ProjectId, Guid RunId);
+public sealed record RetryRunCommand(Guid RunId);
 
 public static class RetryRunHandler
 {
     public static async Task<(Guid, IEnumerable<object>)> Handle(RetryRunCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
     {
-        await access.RequireAsync(command.ProjectId, Permission.AgentsRun, ct);
-        var previous = await db.AgentRuns.AsNoTracking().FirstOrDefaultAsync(r => r.Id == command.RunId && r.ProjectId == command.ProjectId, ct) ?? throw new NotFoundException("Run");
+        var previous = await RunAccess.RequireAsync(db, access, command.RunId, Permission.AgentsRun, ct);
         if (previous.Status is not (RunStatus.Failed or RunStatus.Cancelled)) throw new ConflictException("Only failed or cancelled runs can be retried");
         if (await db.AgentRuns.AnyAsync(r => r.WorkItemId == previous.WorkItemId && r.PullRequestId == previous.PullRequestId && r.Kind == previous.Kind
                 && (r.Status == RunStatus.Queued || r.Status == RunStatus.Running || r.Status == RunStatus.PendingApproval), ct))
@@ -98,7 +118,7 @@ public static class RetryRunHandler
     }
 }
 
-/// <summary>Manually start an agent on a work item (implement) or pull request (review).</summary>
+/// <summary>Start one of the caller's agents (or, for admins, any agent) on a work item (implement) or pull request (review).</summary>
 public sealed record StartRunCommand(Guid ProjectId, Guid AgentId, int? WorkItemAzureId, Guid? PullRequestId);
 
 public sealed class StartRunCommandValidator : AbstractValidator<StartRunCommand>
@@ -112,15 +132,19 @@ public static class StartRunHandler
     public static async Task<(Guid, IEnumerable<object>)> Handle(StartRunCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
     {
         await access.RequireAsync(command.ProjectId, Permission.AgentsRun, ct);
+        var userId = access.RequireUser();
         var project = await db.Projects.AsNoTracking().FirstAsync(p => p.Id == command.ProjectId, ct);
-        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Id == command.AgentId && a.ProjectId == project.Id && a.Enabled, ct)
+        var settings = await db.Organizations.AsNoTracking().Where(o => o.Id == project.OrganizationId).Select(o => o.Settings).FirstAsync(ct);
+        var agent = await db.Agents.AsNoTracking().FirstOrDefaultAsync(a => a.Id == command.AgentId && a.Enabled && (a.ProjectId == null || a.ProjectId == project.Id), ct)
             ?? throw new NotFoundException("Enabled agent");
+        var isAdmin = user.IsSystemAdmin || await access.OrganizationRoleAsync(ct) is OrganizationRole.Admin or OrganizationRole.Owner;
+        if (!isAdmin && agent.OwnerUserId != userId && agent.OwnerUserId is not null) throw new ForbiddenException("You can only start your own agents");
         AgentRun run;
         if (command.WorkItemAzureId is { } azureId)
         {
             if (agent.Kind != AgentKind.Developer) throw new BusinessRuleException("Only developer agents implement work items");
             var item = await db.WorkItems.AsNoTracking().FirstOrDefaultAsync(w => w.ProjectId == project.Id && w.AzureId == azureId, ct) ?? throw new NotFoundException("Work item");
-            run = AgentRun.Create(project.OrganizationId, project.Id, agent.Id, RunKind.Implement, project.Settings.RequireRunApproval, item.Id, item.AzureId, requestedBy: user.ActorName);
+            run = AgentRun.Create(project.OrganizationId, project.Id, agent.Id, RunKind.Implement, settings.RequireRunApproval, item.Id, item.AzureId, requestedBy: user.ActorName);
         }
         else
         {

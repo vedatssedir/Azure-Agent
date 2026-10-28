@@ -2,7 +2,6 @@ using AzureAgent.Api.Infrastructure;
 using AzureAgent.Application.Features.Auth;
 using AzureAgent.Application.Features.Identity;
 using AzureAgent.Application.Features.Organizations;
-using AzureAgent.Domain.Identity;
 using Carter;
 using Wolverine;
 
@@ -10,7 +9,8 @@ namespace AzureAgent.Api.Modules;
 
 public sealed class AuthModule : ICarterModule
 {
-    public sealed record SetupRequest(string Email, string DisplayName, string Password, string OrganizationName);
+    public sealed record SetupRequest(string Email, string DisplayName, string Password, string AzureOrganizationUrl, string PersonalAccessToken);
+    public sealed record SignUpRequest(string Email, string DisplayName, string Password, string PersonalAccessToken);
     public sealed record LoginRequest(string Email, string Password);
     public sealed record RefreshRequest(string RefreshToken);
     public sealed record ExternalCallbackRequest(string Code, string State);
@@ -20,8 +20,13 @@ public sealed class AuthModule : ICarterModule
     public void AddRoutes(IEndpointRouteBuilder app)
     {
         var auth = app.MapGroup("/api/auth").WithTags("Auth");
+        auth.MapGet("/status", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<SetupStatusDto>(new GetSetupStatusQuery(), ct)).AllowAnonymous();
         auth.MapPost("/setup", (SetupRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
-            bus.InvokeAsync<AuthResult>(new SetupCommand(r.Email, r.DisplayName, r.Password, r.OrganizationName, http.ClientIp()), ct)).AllowAnonymous().RequireRateLimiting("auth");
+            bus.InvokeAsync<AuthResult>(new SetupCommand(r.Email, r.DisplayName, r.Password, r.AzureOrganizationUrl, r.PersonalAccessToken, http.ClientIp()), ct))
+            .AllowAnonymous().RequireRateLimiting("auth");
+        auth.MapPost("/signup", (SignUpRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
+            bus.InvokeAsync<AuthResult>(new SignUpCommand(r.Email, r.DisplayName, r.Password, r.PersonalAccessToken, http.ClientIp()), ct))
+            .AllowAnonymous().RequireRateLimiting("auth");
         auth.MapPost("/login", (LoginRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
             bus.InvokeAsync<AuthResult>(new LoginCommand(r.Email, r.Password, http.ClientIp()), ct)).AllowAnonymous().RequireRateLimiting("auth");
         auth.MapPost("/refresh", (RefreshRequest r, IMessageBus bus, HttpContext http, CancellationToken ct) =>
@@ -32,6 +37,11 @@ public sealed class AuthModule : ICarterModule
             return Results.NoContent();
         }).AllowAnonymous();
         auth.MapGet("/me", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<MeDto>(new GetMeQuery(), ct)).RequireAuthorization();
+        auth.MapPost("/change-password", async (ChangePasswordCommand c, IMessageBus bus, CancellationToken ct) =>
+        {
+            await bus.InvokeAsync(c, ct);
+            return Results.NoContent();
+        }).RequireAuthorization();
         auth.MapGet("/providers", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<AuthProvidersDto>(new GetAuthProvidersQuery(), ct)).AllowAnonymous();
         auth.MapPost("/entra/start", (IMessageBus bus, CancellationToken ct) =>
             bus.InvokeAsync<ExternalSignInStartDto>(new BeginExternalSignInCommand(), ct)).AllowAnonymous().RequireRateLimiting("auth");
@@ -52,30 +62,5 @@ public sealed class AuthModule : ICarterModule
             await bus.InvokeAsync(new DeleteMyAzureCredentialCommand(id), ct);
             return Results.NoContent();
         });
-        auth.MapPost("/change-password", async (ChangePasswordCommand c, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(c, ct);
-            return Results.NoContent();
-        }).RequireAuthorization();
-
-        var orgs = app.MapGroup("/api/organizations").WithTags("Organizations").RequireAuthorization();
-        orgs.MapPost("/", (CreateOrganizationCommand c, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<OrganizationMembershipDto>(c, ct));
-        orgs.MapGet("/members", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<OrganizationMemberDto>>(new ListOrganizationMembersQuery(), ct));
-        orgs.MapPost("/members", (AddOrganizationMemberCommand c, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<OrganizationMemberDto>(c, ct));
-        orgs.MapGet("/invitations", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<InvitationDto>>(new ListInvitationsQuery(), ct));
-        orgs.MapPost("/invitations", (CreateInvitationsCommand c, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<InvitationLinkDto>>(c, ct));
-        orgs.MapPost("/invitations/{id:guid}/renew", (Guid id, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<InvitationLinkDto>(new RenewInvitationCommand(id), ct));
-        orgs.MapDelete("/invitations/{id:guid}", async (Guid id, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(new RevokeInvitationCommand(id), ct);
-            return Results.NoContent();
-        });
-        orgs.MapPut("/members/{userId:guid}/active", async (Guid userId, ActiveRequest r, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(new SetUserActiveCommand(userId, r.IsActive), ct);
-            return Results.NoContent();
-        });
     }
-
-    public sealed record ActiveRequest(bool IsActive);
 }

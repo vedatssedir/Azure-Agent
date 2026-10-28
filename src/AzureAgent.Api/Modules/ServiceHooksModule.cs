@@ -13,29 +13,35 @@ using Wolverine;
 namespace AzureAgent.Api.Modules;
 
 /// <summary>
-/// Azure DevOps Service Hooks (Web Hooks). Authenticated with HTTP Basic: any user name, password =
-/// the project's AZURE_SERVICE_HOOK_PASSWORD secret. Work item events refresh one item; git events
-/// trigger a project sync.
+/// Azure DevOps Service Hooks (Web Hooks), one URL per organization. Authenticated with HTTP Basic:
+/// any user name, password = the organization's service hook password (Settings → Azure DevOps).
+/// Events name their project; work item events refresh one item, git events sync the project.
 /// </summary>
 public sealed class ServiceHooksModule : ICarterModule
 {
     public void AddRoutes(IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/hooks/{projectId:guid}", async (Guid projectId, HttpContext http, AppDbContext db, ITenantContext tenant, SecretResolver secrets,
+        app.MapPost("/api/hooks/{organizationId:guid}", async (Guid organizationId, HttpContext http, AppDbContext db, ITenantContext tenant, SecretResolver secrets,
             IMessageBus bus, ILogger<ServiceHooksModule> logger, CancellationToken ct) =>
         {
-            tenant.UseAllOrganizations();
-            var project = await db.Projects.AsNoTracking().FirstOrDefaultAsync(p => p.Id == projectId, ct);
-            if (project is null) return Results.Unauthorized();
-            tenant.Use(project.OrganizationId);
-            var expected = await secrets.GetAsync(projectId, SecretNames.ServiceHookPassword, ct);
+            tenant.Use(organizationId);
+            var expected = await secrets.GetOrganizationAsync(organizationId, SecretNames.ServiceHookPassword, ct);
             if (expected is null || !PasswordMatches(http.Request.Headers.Authorization.ToString(), expected)) return Results.Unauthorized();
 
             using var payload = await JsonDocument.ParseAsync(http.Request.Body, cancellationToken: ct);
+            var azureProjectId = payload.RootElement.TryGetProperty("resourceContainers", out var containers) && containers.TryGetProperty("project", out var p)
+                && p.TryGetProperty("id", out var id) ? id.GetString() : null;
+            var project = azureProjectId is null ? null : await db.Projects.AsNoTracking().FirstOrDefaultAsync(x => x.AzureId == azureProjectId, ct);
             var eventType = payload.RootElement.TryGetProperty("eventType", out var e) ? e.GetString() ?? "" : "";
+            if (project is null)
+            {
+                // A project created after the last sync: pick it up with an organization sync.
+                await bus.PublishAsync(new SyncOrganization(organizationId, eventType));
+                return Results.Accepted();
+            }
             logger.LogInformation("Service hook {EventType} for project {Project}", eventType, project.Key);
-            if (eventType.StartsWith("workitem.", StringComparison.Ordinal) && WorkItemId(payload.RootElement) is { } id)
-                await bus.PublishAsync(new SyncWorkItem(project.OrganizationId, project.Id, id));
+            if (eventType.StartsWith("workitem.", StringComparison.Ordinal) && WorkItemId(payload.RootElement) is { } workItemId)
+                await bus.PublishAsync(new SyncWorkItem(project.OrganizationId, project.Id, workItemId));
             else if (eventType.StartsWith("git.", StringComparison.Ordinal))
                 await bus.PublishAsync(new SyncProject(project.OrganizationId, project.Id, eventType));
             return Results.Accepted();

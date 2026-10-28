@@ -28,12 +28,18 @@ public sealed class RefreshToken : Entity
     public bool IsActive(DateTimeOffset now) => RevokedAt is null && ExpiresAt > now;
 }
 
+/// <summary>A tenant: one Azure DevOps organization connected to the platform.</summary>
 public sealed class Organization : Entity
 {
     public required string Name { get; set; }
     public required string Slug { get; init; }
+    /// <summary>https://dev.azure.com/&lt;organization&gt;; everything (projects, repos, boards, people) is synced from here.</summary>
+    public string? AzureOrganizationUrl { get; set; }
     /// <summary>Hard monthly spend limit for all agents of the organization (USD). Null = unlimited.</summary>
     public decimal? MonthlyBudgetUsd { get; set; }
+    public Projects.OrganizationSettings Settings { get; set; } = new();
+    public DateTimeOffset? LastSyncedAt { get; set; }
+    public string? LastSyncError { get; set; }
 }
 
 public enum OrganizationRole

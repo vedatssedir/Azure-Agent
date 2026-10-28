@@ -23,9 +23,8 @@ public sealed class LiveCliTests : IDisposable
         var work = Directory.CreateDirectory(Path.Combine(_root, "work")).FullName;
         var home = Directory.CreateDirectory(Path.Combine(_root, "home")).FullName;
         var cli = new ClaudeCodeAdapter(Environment.GetEnvironmentVariable("AgentRuntime__ClaudeCliPath") ?? "claude");
-        var mcp = new CliMcpServer("echo", McpTransport.Stdio, "true", [], null, new Dictionary<string, string>());
         var (args, env) = cli.Prepare(new CliInvocation("claude-sonnet-4-5", work, home, "Be brief.", "Say hello", ["dotnet"], false, 2, 0.5m,
-            new Dictionary<string, string>(), [mcp]));
+            new Dictionary<string, string>()));
         var events = new List<CliEvent>();
         var runner = new ProcessRunner(Options.Create(new AgentRuntimeOptions()));
         var exit = await runner.RunStreamingAsync(cli.Executable, args, work, env, TimeSpan.FromMinutes(2),

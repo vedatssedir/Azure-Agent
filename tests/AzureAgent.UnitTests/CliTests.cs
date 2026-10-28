@@ -12,9 +12,9 @@ public sealed class ClaudeCodeAdapterTests : IDisposable
 
     public void Dispose() => Directory.Delete(_root, true);
 
-    private CliInvocation Invocation(bool readOnly = false, IReadOnlyList<CliMcpServer>? mcp = null) => new(
+    private CliInvocation Invocation(bool readOnly = false) => new(
         "claude-sonnet-4-5", Path.Combine(_root, "work"), Path.Combine(_root, "home"), "Follow the skills.", "Implement #1",
-        ["dotnet", "npm", "git"], readOnly, 40, 5m, new Dictionary<string, string> { ["ANTHROPIC_API_KEY"] = "sk-ant-x" }, mcp ?? []);
+        ["dotnet", "npm", "git"], readOnly, 40, 5m, new Dictionary<string, string> { ["ANTHROPIC_API_KEY"] = "sk-ant-x" });
 
     [Fact]
     public void Repository_policy_becomes_pre_approved_tools_and_everything_else_is_denied()
@@ -41,15 +41,12 @@ public sealed class ClaudeCodeAdapterTests : IDisposable
     }
 
     [Fact]
-    public void Read_only_runs_get_no_write_or_shell_tools_and_mcp_servers_are_configured()
+    public void Read_only_runs_get_no_write_or_shell_tools_and_no_mcp_servers()
     {
-        var mcp = new CliMcpServer("azure-devops", McpTransport.Stdio, "npx", ["-y", "@azure-devops/mcp", "contoso"], null, new Dictionary<string, string> { ["ADO_PAT"] = "p" });
-        var (args, _) = new ClaudeCodeAdapter("claude").Prepare(Invocation(readOnly: true, mcp: [mcp]));
-        var allowed = args.SkipWhile(a => a != "--allowedTools").Skip(1).ToList();
-        allowed.ShouldBe(["Read", "Glob", "Grep", "LS", "mcp__azure-devops"]);
-        var config = JsonNode.Parse(File.ReadAllText(args[args.ToList().IndexOf("--mcp-config") + 1]))!;
-        config["mcpServers"]!["azure-devops"]!["command"]!.GetValue<string>().ShouldBe("npx");
-        config["mcpServers"]!["azure-devops"]!["env"]!["ADO_PAT"]!.GetValue<string>().ShouldBe("p");
+        var (args, _) = new ClaudeCodeAdapter("claude").Prepare(Invocation(readOnly: true));
+        var allowed = args.SkipWhile(a => a != "--allowedTools").Skip(1).TakeWhile(a => !a.StartsWith("--")).ToList();
+        allowed.ShouldBe(["Read", "Glob", "Grep", "LS"]);
+        args.ShouldNotContain("--mcp-config");
     }
 
     [Fact]
@@ -94,7 +91,7 @@ public sealed class CursorCliAdapterTests : IDisposable
     {
         var work = Path.Combine(_root, "work");
         var (args, env) = new CursorCliAdapter("cursor-agent").Prepare(new CliInvocation("sonnet-4.5", work, Path.Combine(_root, "home"), "Rules.", "Implement #1",
-            ["dotnet", "curl"], false, 40, 5m, new Dictionary<string, string> { ["CURSOR_API_KEY"] = "key" }, []));
+            ["dotnet", "curl"], false, 40, 5m, new Dictionary<string, string> { ["CURSOR_API_KEY"] = "key" }));
         args[0].ShouldBe("-p");
         args[1].ShouldStartWith("Rules.");
         args[1].ShouldEndWith("Implement #1");
@@ -116,7 +113,7 @@ public sealed class CursorCliAdapterTests : IDisposable
     public void Read_only_runs_propose_changes_only()
     {
         var (args, _) = new CursorCliAdapter("cursor-agent").Prepare(new CliInvocation("gpt-5", Path.Combine(_root, "w"), Path.Combine(_root, "h"), "R", "Review",
-            [], true, 10, 1m, new Dictionary<string, string>(), []));
+            [], true, 10, 1m, new Dictionary<string, string>()));
         args.ShouldNotContain("--force");
     }
 

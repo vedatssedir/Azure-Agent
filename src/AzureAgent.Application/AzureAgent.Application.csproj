@@ -7,4 +7,7 @@
     <PackageReference Include="FluentValidation" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AzureAgent.UnitTests" />
+  </ItemGroup>
 </Project>

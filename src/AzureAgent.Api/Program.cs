@@ -105,6 +105,7 @@ try
         {
             opts.UseRabbitMq(new Uri(rabbit)).AutoProvision();
             opts.PublishMessage<ExecuteAgentRun>().ToRabbitQueue("agent-runs");
+            opts.PublishMessage<SyncOrganization>().ToRabbitQueue("azure-sync");
             opts.PublishMessage<SyncProject>().ToRabbitQueue("azure-sync");
             opts.PublishMessage<SyncWorkItem>().ToRabbitQueue("azure-sync");
             // Nodes with Messaging:AgentWorkers = 0 only serve the API.

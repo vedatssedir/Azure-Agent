@@ -1,255 +1,209 @@
 import { useState } from "react";
-import { api, fmtUsd, p, type Agent, type AgentKind, type AgentRuntime, type AgentRuntimeInfo, type McpServer, type ModelProvider, type Skill, type Team } from "../api";
-import { Drawer, ErrorBox, Field, Notice, useAction, useGet } from "../components/ui";
-import type { ProjectPageProps } from "./ProjectShell";
+import { Link, useSearchParams } from "react-router-dom";
+import { api, fmtAgo, fmtUsd, PROVIDER_LABEL, RUNTIME_LABEL, type Agent, type AgentKind, type AgentSettings, type AgentSkill, type ModelProvider,
+  type ProviderStatusList, type AgentRuntime, type Users } from "../api";
+import { useApp } from "../context";
+import { Avatar, Check, Empty, ErrorBox, Field, Loading, Modal, PageHead, useAction, useGet } from "../components/ui";
+import { Icon } from "../components/icons";
 
-export const PROVIDERS: Record<ModelProvider, { label: string; key: string; example: string }> = {
-  Anthropic: { label: "Anthropic (Claude)", key: "ANTHROPIC_API_KEY", example: "claude-sonnet-4-5" },
-  OpenAI: { label: "OpenAI", key: "OPENAI_API_KEY", example: "gpt-5" },
-  AzureOpenAI: { label: "Azure OpenAI", key: "AZURE_OPENAI_API_KEY", example: "gpt-5 (deployment adı)" },
-  Gemini: { label: "Google Gemini", key: "GEMINI_API_KEY", example: "gemini-2.5-pro" },
-};
-
-export const RUNTIMES: Record<AgentRuntime, { label: string; keys: string; model: string; provider?: ModelProvider }> = {
-  Framework: { label: "Microsoft Agent Framework", keys: "", model: "" },
-  ClaudeCode: { label: "Claude Code CLI", keys: "ANTHROPIC_API_KEY veya CLAUDE_CODE_OAUTH_TOKEN", model: "claude-sonnet-4-5", provider: "Anthropic" },
-  CursorCli: { label: "Cursor CLI", keys: "CURSOR_API_KEY", model: "sonnet-4.5" },
-};
-
-/** Runtime choice with what this server has installed; CLI runtimes set their provider and a model example. */
-function RuntimeField({ value, onChange }: { value: AgentRuntime; onChange: (runtime: AgentRuntime) => void }) {
-  const runtimes = useGet<AgentRuntimeInfo[]>(["agent-runtimes"], "/api/agent-runtimes");
-  const info = runtimes.data?.find((r) => r.runtime === value);
-  const hint = value === "Framework"
-    ? "Platformun araçlarıyla (list_files, read_file, run_command…) her sağlayıcı"
-    : info && !info.available ? `Uyarı: ${info.detail}. Agent worker'larına kurulmalı.`
-    : `${info?.version ?? RUNTIMES[value].label} · anahtar: ${RUNTIMES[value].keys}`;
+/** Agent definitions in the style of Paperclip: each agent has its own runtime, model, instructions and skills. */
+export function Agents() {
+  const { isAdmin } = useApp();
+  const [params, setParams] = useSearchParams();
+  const all = isAdmin && params.get("all") === "1";
+  const agents = useGet<Agent[]>(["agents", all ? "all" : "mine"], `/api/agents${all ? "" : "?mine=true"}`, { refetchInterval: 30_000 });
+  const [editing, setEditing] = useState<Agent | "new" | null>(null);
   return (
-    <Field label="Çalışma ortamı" hint={hint}>
-      <select value={value} onChange={(e) => onChange(e.target.value as AgentRuntime)}>
-        {(Object.keys(RUNTIMES) as AgentRuntime[]).map((r) => {
-          const available = runtimes.data?.find((x) => x.runtime === r)?.available ?? true;
-          return <option key={r} value={r}>{RUNTIMES[r].label}{available ? "" : " (kurulu değil)"}</option>;
-        })}
-      </select>
-    </Field>
-  );
-}
-
-type Draft = Omit<Agent, "id" | "skills" | "mcpServers" | "activeRuns" | "spentThisMonthUsd"> & { id?: string };
-
-const EMPTY: Draft = {
-  name: "", kind: "Developer", provider: "Anthropic", model: "claude-sonnet-4-5", instructions: "", pairedUniqueName: null, teamId: null,
-  enabled: true, maxConcurrentRuns: 1, monthlyBudgetUsd: null, runtime: "Framework",
-  settings: { temperature: null, maxIterations: 40, maxTokensPerRun: 400_000, maxCostPerRunUsd: 5, timeoutMinutes: 45, endpoint: null },
-};
-
-export function Agents({ project, can }: ProjectPageProps) {
-  const agents = useGet<Agent[]>(["agents", project.id], p(project.id, "/agents"), { refetchInterval: 15_000 });
-  const teams = useGet<Team[]>(["teams", project.id], p(project.id, "/teams"));
-  const [editing, setEditing] = useState<Draft | null>(null);
-  const [capabilities, setCapabilities] = useState<Agent | null>(null);
-  const [provision, setProvision] = useState<Team | null>(null);
-  const manage = can("agents.manage");
-  const toggle = useAction((agent: Agent) => api(p(project.id, `/agents/${agent.id}`), { method: "PUT", body: { ...agent, enabled: !agent.enabled } }), [["agents", project.id]]);
-
-  return (
-    <div className="stack">
-      <section className="card">
-        <div className="row"><h2 style={{ margin: 0 }}>Takımlar</h2><span className="spacer" />{manage ? <button className="primary" onClick={() => setEditing({ ...EMPTY })}>Yeni agent</button> : null}</div>
-        <p className="muted small">Her developer'ın bir agent'ı olur. Developer Azure'da bir maddeyi kendine atadığında o maddeyi kendi agent'ı çalışır.</p>
-        <ErrorBox error={teams.error ?? toggle.error} />
-        {teams.data?.length === 0 ? <div className="muted">Takım yok. Önce Azure senkronunu çalıştırın.</div> : null}
-        {teams.data?.map((team) => (
-          <div key={team.id} className="stack" style={{ marginBottom: 12 }}>
-            <div className="row">
-              <strong>{team.name}</strong>
-              <span className="muted small">{team.members.length} üye · {team.members.filter((m) => m.agentId).length} agent</span>
-              <span className="spacer" />
-              {manage && team.members.some((m) => !m.agentId) ? <button onClick={() => setProvision(team)}>Eksik agent'ları oluştur</button> : null}
+    <>
+      <PageHead title="Agent'lar" subtitle="Her developer birden fazla agent çalıştırabilir. Agent'lar Azure'da sahiplerinin yetkileriyle çalışır.">
+        <button className="primary" onClick={() => setEditing("new")}><Icon name="plus" /> Yeni agent</button>
+      </PageHead>
+      {isAdmin ? (
+        <div className="tabs">
+          <button className={`tab${!all ? " active" : ""}`} onClick={() => setParams({})}>Agent'larım</button>
+          <button className={`tab${all ? " active" : ""}`} onClick={() => setParams({ all: "1" })}>Organizasyondaki tüm agent'lar</button>
+        </div>
+      ) : null}
+      <ErrorBox error={agents.error} />
+      {agents.isLoading ? <Loading /> : agents.data?.length === 0 ? (
+        <Empty>Henüz agent yok. Bir agent oluşturun; size atanan işleri geliştirip pull request açsın.</Empty>
+      ) : (
+        <div className="grid cards">
+          {(agents.data ?? []).map((a) => (
+            <div key={a.id} className="card hover agent-card" onClick={() => setEditing(a)}>
+              <div className="top">
+                <Avatar name={a.name} size="xl" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="row nowrap"><span className="name truncate">{a.name}</span>{a.isDefault ? <span className="badge info">varsayılan</span> : null}
+                    {!a.enabled ? <span className="badge">kapalı</span> : null}</div>
+                  <div className="small muted truncate">{a.title || (a.kind === "Developer" ? "Developer agent" : "Kod inceleme agent'ı")}</div>
+                  <div className="small muted truncate">{a.ownerName ? `Sahibi: ${a.ownerName}` : "Ortak agent"}{a.projectName ? ` · ${a.projectName}` : ""}</div>
+                </div>
+              </div>
+              <div className="row small">
+                <span className="tag">{RUNTIME_LABEL[a.runtime]}</span><span className="tag mono">{a.model}</span>
+                <span className="tag">{a.kind === "Developer" ? "Geliştirir" : "İnceler"}</span>
+                {a.skills.filter((s) => s.enabled).length ? <span className="tag agent">{a.skills.filter((s) => s.enabled).length} skill</span> : null}
+              </div>
+              <div className="row small muted">
+                {a.activeRuns ? <span className="badge info">{a.activeRuns} çalışıyor</span> : null}
+                <span>Bu ay {a.runsThisMonth} çalıştırma · {fmtUsd(a.spentThisMonthUsd)}{a.monthlyBudgetUsd ? ` / ${fmtUsd(a.monthlyBudgetUsd, 0)}` : ""}</span>
+                <span className="spacer" />
+                <Link to={`/runs?agent=${a.id}`} onClick={(e) => e.stopPropagation()}>{a.lastRunAt ? `son ${fmtAgo(a.lastRunAt)}` : "çalıştırmalar"}</Link>
+              </div>
             </div>
-            <div className="row">{team.members.map((m) => (
-              <span key={m.uniqueName} className={`badge ${m.agentId ? "ok" : ""}`} title={m.uniqueName}>{m.displayName}{m.agentName ? ` → ${m.agentName}` : " · agent yok"}</span>
-            ))}</div>
-          </div>
-        ))}
-      </section>
-
-      <section className="card">
-        <h2>Agent'lar</h2>
-        <ErrorBox error={agents.error} />
-        <table>
-          <thead><tr><th>Agent</th><th>Model</th><th>Developer</th><th>Skill / MCP</th><th className="right">Bu ay</th><th>Durum</th><th /></tr></thead>
-          <tbody>{agents.data?.map((a) => (
-            <tr key={a.id}>
-              <td><strong>{a.name}</strong><div className="small muted">{a.kind === "Reviewer" ? "Code reviewer" : "Developer agent"}</div></td>
-              <td>{a.runtime === "Framework" ? PROVIDERS[a.provider].label : <span className="badge info">{RUNTIMES[a.runtime].label}</span>}<div className="small muted">{a.model}</div></td>
-              <td>{a.pairedUniqueName ?? <span className="muted">—</span>}</td>
-              <td><div className="row">{a.skills.map((s) => <span key={s} className="badge">{s}</span>)}{a.mcpServers.map((m) => <span key={m} className="badge info">{m}</span>)}</div></td>
-              <td className="right">{fmtUsd(a.spentThisMonthUsd)}<div className="small muted">limit {fmtUsd(a.monthlyBudgetUsd)}</div></td>
-              <td><span className={`badge ${a.enabled ? "ok" : ""}`}>{a.enabled ? "Aktif" : "Durdu"}</span>{a.activeRuns ? <div className="small muted">{a.activeRuns} aktif iş</div> : null}</td>
-              <td>{manage ? <div className="row">
-                <button onClick={() => setEditing({ ...a })}>Düzenle</button>
-                <button onClick={() => setCapabilities(a)}>Skill/MCP</button>
-                <button onClick={() => toggle.run(a)}>{a.enabled ? "Durdur" : "Başlat"}</button>
-              </div> : null}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </section>
-
-      {editing ? <AgentEditor projectId={project.id} draft={editing} teams={teams.data ?? []} onClose={() => setEditing(null)} /> : null}
-      {capabilities ? <CapabilitiesEditor projectId={project.id} agent={capabilities} onClose={() => setCapabilities(null)} /> : null}
-      {provision ? <ProvisionTeam projectId={project.id} team={provision} onClose={() => setProvision(null)} /> : null}
-    </div>
+          ))}
+        </div>
+      )}
+      {editing ? <AgentEditor agent={editing === "new" ? null : editing} onClose={() => setEditing(null)} /> : null}
+    </>
   );
 }
 
-function AgentEditor({ projectId, draft: initial, teams, onClose }: { projectId: string; draft: Draft; teams: Team[]; onClose: () => void }) {
-  const [draft, setDraft] = useState<Draft>(initial);
-  const keys = [["agents", projectId], ["teams", projectId]];
-  const save = useAction(() => {
-    const { id, ...body } = draft;
-    return api(p(projectId, id ? `/agents/${id}` : "/agents"), { method: id ? "PUT" : "POST", body: { ...body, pairedUniqueName: body.pairedUniqueName || null } });
-  }, keys);
-  const remove = useAction(() => api(p(projectId, `/agents/${draft.id}`), { method: "DELETE" }), keys);
-  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft({ ...draft, [key]: value });
-  const setting = <K extends keyof Draft["settings"]>(key: K, value: Draft["settings"][K]) => setDraft({ ...draft, settings: { ...draft.settings, [key]: value } });
+const DEFAULT_SETTINGS: AgentSettings = { temperature: null, maxIterations: 40, maxTokensPerRun: 400_000, maxCostPerRunUsd: 5, timeoutMinutes: 45, endpoint: null };
+const SKILL_TEMPLATE = "# Skill adı\n\nNe zaman kullanılır:\n- ...\n\nNasıl yapılır:\n1. ...\n";
+
+type Tab = "general" | "runtime" | "instructions" | "skills" | "limits";
+
+function AgentEditor({ agent, onClose }: { agent: Agent | null; onClose: () => void }) {
+  const { isAdmin, me, projects } = useApp();
+  const providers = useGet<ProviderStatusList>(["providers"], "/api/settings/providers");
+  const users = useGet<Users>(["users"], isAdmin ? "/api/settings/users" : null);
+  const readOnly = agent !== null && !agent.canEdit;
+  const [tab, setTab] = useState<Tab>("general");
+  const [form, setForm] = useState(() => ({
+    name: agent?.name ?? "", title: agent?.title ?? "", kind: agent?.kind ?? ("Developer" as AgentKind),
+    runtime: agent?.runtime ?? (null as AgentRuntime | null), provider: agent?.provider ?? (null as ModelProvider | null), model: agent?.model ?? "",
+    instructions: agent?.instructions ?? "", skills: agent?.skills ?? ([] as AgentSkill[]), ownerUserId: agent ? agent.ownerUserId : me.user.id,
+    projectId: agent?.projectId ?? null, isDefault: agent?.isDefault ?? false, enabled: agent?.enabled ?? true, maxConcurrentRuns: agent?.maxConcurrentRuns ?? 1,
+    monthlyBudgetUsd: agent?.monthlyBudgetUsd ?? null, settings: agent?.settings ?? DEFAULT_SETTINGS,
+  }));
+  const runtime = form.runtime ?? providers.data?.defaultRuntime ?? "ClaudeCode";
+  const provider = form.provider ?? providers.data?.defaultProvider ?? "Anthropic";
+  const selected = providers.data?.providers.find((x) => x.runtime === runtime && (x.kind === "cli" || x.provider === provider));
+  const model = form.model || selected?.defaultModel || providers.data?.defaultModel || "";
+  const keys = [["agents"]];
+  const save = useAction(() => api<Agent>(agent ? `/api/agents/${agent.id}` : "/api/agents", {
+    method: agent ? "PUT" : "POST",
+    body: { ...form, runtime, provider, model, title: form.title || null },
+  }), keys);
+  const remove = useAction(() => api(`/api/agents/${agent!.id}`, { method: "DELETE" }).then(() => true), keys);
+  const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => setForm({ ...form, [key]: value });
+  const setSettings = <K extends keyof AgentSettings>(key: K, value: AgentSettings[K]) => setForm({ ...form, settings: { ...form.settings, [key]: value } });
+  const setSkill = (index: number, skill: AgentSkill) => set("skills", form.skills.map((s, i) => (i === index ? skill : s)));
+  const tabs: Array<[Tab, string]> = [["general", "Genel"], ["runtime", "Çalışma ortamı"], ["instructions", "Talimatlar"], ["skills", `Skill'ler (${form.skills.length})`], ["limits", "Limitler"]];
+
   return (
-    <Drawer title={draft.id ? "Agent'ı düzenle" : "Yeni agent"} onClose={onClose}>
-      <ErrorBox error={save.error ?? remove.error} />
-      <div className="form">
-        <div className="form-2">
-          <Field label="Ad"><input value={draft.name} onChange={(e) => set("name", e.target.value)} /></Field>
-          <Field label="Tür">
-            <select value={draft.kind} onChange={(e) => set("kind", e.target.value as AgentKind)}>
-              <option value="Developer">Developer (iş yapar, PR açar)</option><option value="Reviewer">Reviewer (PR inceler)</option>
+    <Modal title={<div className="row nowrap"><Avatar name={form.name || "Yeni agent"} size="lg" /><div><h2 style={{ margin: 0 }}>{form.name || "Yeni agent"}</h2>
+      <div className="small muted">{agent ? `@${agent.slug}` : "Agent tanımı"}{readOnly ? " · salt okunur" : ""}</div></div></div>} onClose={onClose}>
+      <div className="tabs">{tabs.map(([key, label]) => <button key={key} className={`tab${tab === key ? " active" : ""}`} onClick={() => setTab(key)}>{label}</button>)}</div>
+      <ErrorBox error={save.error ?? remove.error ?? providers.error} />
+      <fieldset disabled={readOnly} style={{ border: 0, padding: 0, margin: 0 }} className="stack">
+        {tab === "general" ? <>
+          <div className="form-2">
+            <Field label="Ad"><input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Örn. Backend geliştirici" /></Field>
+            <Field label="Unvan" hint="Kartta görünen kısa açıklama"><input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="Örn. .NET API uzmanı" /></Field>
+          </div>
+          <Field label="Görev">
+            <select value={form.kind} onChange={(e) => set("kind", e.target.value as AgentKind)}>
+              <option value="Developer">Developer: work item'ları geliştirir, branch ve pull request açar</option>
+              <option value="Reviewer">Reviewer: pull request'leri inceler, yorum ve öneri bırakır</option>
             </select>
           </Field>
-          <RuntimeField value={draft.runtime} onChange={(runtime) => setDraft({
-            ...draft, runtime, provider: RUNTIMES[runtime].provider ?? draft.provider, model: runtime === "Framework" ? PROVIDERS[draft.provider].example : RUNTIMES[runtime].model,
-          })} />
-          {draft.runtime === "Framework" ? (
-            <Field label="Sağlayıcı" hint={`Anahtar: ${PROVIDERS[draft.provider].key} (Ayarlar → Secret'lar)`}>
-              <select value={draft.provider} onChange={(e) => set("provider", e.target.value as ModelProvider)}>
-                {Object.entries(PROVIDERS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-              </select>
-            </Field>
-          ) : null}
-          <Field label="Model" hint={`Örn. ${draft.runtime === "Framework" ? PROVIDERS[draft.provider].example : RUNTIMES[draft.runtime].model}`}><input value={draft.model} onChange={(e) => set("model", e.target.value)} /></Field>
-        </div>
-        {draft.runtime !== "Framework" ? <p className="small muted">
-          CLI agent'ı klonlanan repolarda kendi araçlarıyla çalışır. Platform yine kontrol eder: repo politikasındaki komutlar dışında komut yok, git yok,
-          sunucu ortam değişkenleri ve Azure kimliği yok; commit, push ve PR'ı platform yapar; token/maliyet limitleri anlık uygulanır.
-          {draft.runtime === "CursorCli" ? " Cursor token kullanımını bildirmez; maliyet Cursor planına yansır." : ""}
-        </p> : null}
-        {draft.runtime === "Framework" && draft.provider === "AzureOpenAI" ? <Field label="Azure OpenAI endpoint" hint="https://<kaynak>.openai.azure.com"><input value={draft.settings.endpoint ?? ""} onChange={(e) => setting("endpoint", e.target.value || null)} /></Field> : null}
-        {draft.kind === "Developer" ? (
           <div className="form-2">
-            <Field label="Developer (Azure kullanıcı adı)" hint="Bu kişiye atanan maddeleri bu agent çalışır">
-              <input type="email" value={draft.pairedUniqueName ?? ""} onChange={(e) => set("pairedUniqueName", e.target.value)} />
-            </Field>
-            <Field label="Takım">
-              <select value={draft.teamId ?? ""} onChange={(e) => set("teamId", e.target.value || null)}>
-                <option value="">—</option>{teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            {isAdmin ? (
+              <Field label="Sahibi" hint="Agent Azure'da sahibinin yetkileriyle çalışır">
+                <select value={form.ownerUserId ?? ""} onChange={(e) => set("ownerUserId", e.target.value || null)}>
+                  <option value="">Ortak (servis kimliği)</option>
+                  {(users.data?.users ?? [{ userId: me.user.id, displayName: me.user.displayName }]).map((u) => <option key={u.userId} value={u.userId}>{u.displayName}</option>)}
+                </select>
+              </Field>
+            ) : null}
+            <Field label="Proje" hint="Boş bırakırsanız tüm projelerde çalışabilir">
+              <select value={form.projectId ?? ""} onChange={(e) => set("projectId", e.target.value || null)}>
+                <option value="">Tüm projeler</option>{projects.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
               </select>
             </Field>
           </div>
+          <Check label="Varsayılan agent'ım" hint="Size atanan işler (agent:<slug> etiketi yoksa) otomatik olarak bu agent'a verilir" checked={form.isDefault} onChange={(v) => set("isDefault", v)} />
+          <Check label="Etkin" checked={form.enabled} onChange={(v) => set("enabled", v)} />
+          {agent ? <div className="callout small">Bir maddeyi bu agent'a vermek için Azure Boards'ta <span className="mono">agent:{agent.slug}</span> etiketini ekleyin.</div> : null}
+        </> : null}
+
+        {tab === "runtime" ? <>
+          {providers.isLoading ? <Loading /> : null}
+          <div className="runtime-cards">
+            {(providers.data?.providers ?? []).map((x) => {
+              const isSelected = x.runtime === runtime && (x.kind === "cli" || x.provider === provider);
+              const usable = x.configured && x.installed !== false;
+              return (
+                <button type="button" key={x.key} className={`runtime-card${isSelected ? " selected" : ""}`}
+                  onClick={() => setForm({ ...form, runtime: x.runtime, provider: x.provider, model: x.defaultModel })}>
+                  <div className="row nowrap"><span className="title">{x.name}</span><span className="spacer" />
+                    <span className={`badge ${usable ? "ok" : "warn"}`}>{usable ? "hazır" : x.installed === false ? "kurulu değil" : "anahtar yok"}</span></div>
+                  <div className="small muted" style={{ marginTop: 4 }}>{x.description}</div>
+                  {x.version ? <div className="small subtle mono">{x.version}</div> : null}
+                </button>
+              );
+            })}
+          </div>
+          {selected && !(selected.configured && selected.installed !== false) ? (
+            <div className="callout small">{selected.name} henüz kullanılamıyor. {isAdmin ? <Link to="/settings/ai">Ayarlar → AI sağlayıcıları</Link> : "Yöneticinizden"} anahtarı tanımlamasını isteyin.</div>
+          ) : null}
+          <div className="form-2">
+            <Field label="Model" hint={runtime === "CursorCli" ? "Cursor model adı (örn. sonnet-4.5, gpt-5, auto)" : `Örn. ${selected?.defaultModel ?? "claude-sonnet-4-5"}`}>
+              <input className="mono" value={model} onChange={(e) => set("model", e.target.value)} />
+            </Field>
+            <Field label="Sağlayıcı"><input value={`${RUNTIME_LABEL[runtime]} · ${PROVIDER_LABEL[provider]}`} disabled /></Field>
+          </div>
+          {provider === "AzureOpenAI" ? (
+            <Field label="Azure OpenAI endpoint" hint="Boşsa Ayarlar'daki organizasyon endpoint'i kullanılır">
+              <input value={form.settings.endpoint ?? ""} onChange={(e) => setSettings("endpoint", e.target.value || null)} placeholder="https://<kaynak>.openai.azure.com" />
+            </Field>
+          ) : null}
+        </> : null}
+
+        {tab === "instructions" ? (
+          <Field label="Talimatlar (system prompt)" hint="Agent'ın kim olduğu, kodlama kuralları, test beklentileri. Her çalıştırmada work item ve repo bilgisiyle birlikte verilir.">
+            <textarea className="code" style={{ minHeight: 360 }} value={form.instructions} onChange={(e) => set("instructions", e.target.value)}
+              placeholder={"Sen deneyimli bir .NET geliştiricisisin.\n- Clean Architecture katmanlarına uy.\n- Her değişiklik için birim testi yaz.\n- PR açıklamasını Türkçe yaz."} />
+          </Field>
         ) : null}
-        <Field label="Talimatlar" hint="Her işte agent'a sistem talimatı olarak verilir">
-          <textarea value={draft.instructions} onChange={(e) => set("instructions", e.target.value)} />
-        </Field>
-        <h3>Limitler ve maliyet</h3>
-        <div className="form-2">
-          <Field label="Aylık bütçe (USD)" hint="Boş = limitsiz"><input type="number" min={0} step="0.01" value={draft.monthlyBudgetUsd ?? ""} onChange={(e) => set("monthlyBudgetUsd", e.target.value === "" ? null : Number(e.target.value))} /></Field>
-          <Field label="İş başına en fazla maliyet (USD)"><input type="number" min={0.01} step="0.01" value={draft.settings.maxCostPerRunUsd} onChange={(e) => setting("maxCostPerRunUsd", Number(e.target.value))} /></Field>
-          <Field label="İş başına en fazla token"><input type="number" min={1000} value={draft.settings.maxTokensPerRun} onChange={(e) => setting("maxTokensPerRun", Number(e.target.value))} /></Field>
-          <Field label={draft.runtime === "ClaudeCode" ? "En fazla tur (--max-turns)" : "En fazla model/araç turu"}><input type="number" min={1} max={200} value={draft.settings.maxIterations} onChange={(e) => setting("maxIterations", Number(e.target.value))} /></Field>
-          <Field label="Zaman aşımı (dakika)"><input type="number" min={1} max={240} value={draft.settings.timeoutMinutes} onChange={(e) => setting("timeoutMinutes", Number(e.target.value))} /></Field>
-          <Field label="Eşzamanlı iş limiti"><input type="number" min={1} max={10} value={draft.maxConcurrentRuns} onChange={(e) => set("maxConcurrentRuns", Number(e.target.value))} /></Field>
-          {draft.runtime === "Framework" ? <Field label="Temperature" hint="Boş = model varsayılanı"><input type="number" min={0} max={2} step="0.1" value={draft.settings.temperature ?? ""} onChange={(e) => setting("temperature", e.target.value === "" ? null : Number(e.target.value))} /></Field> : null}
-        </div>
-        <label className="check"><input type="checkbox" checked={draft.enabled} onChange={(e) => set("enabled", e.target.checked)} /> Aktif</label>
-        <div className="row">
-          <button onClick={onClose}>Vazgeç</button><span className="spacer" />
-          {draft.id ? <button className="danger" onClick={async () => { if (await remove.run(undefined) !== undefined) onClose(); }}>Sil</button> : null}
-          <button className="primary" disabled={save.busy || !draft.name || !draft.model} onClick={async () => { if (await save.run(undefined) !== undefined) onClose(); }}>Kaydet</button>
-        </div>
-      </div>
-    </Drawer>
-  );
-}
 
-function CapabilitiesEditor({ projectId, agent, onClose }: { projectId: string; agent: Agent; onClose: () => void }) {
-  const skills = useGet<Skill[]>(["skills"], "/api/skills");
-  const mcp = useGet<McpServer[]>(["mcp"], "/api/mcp-servers");
-  const [selectedSkills, setSkills] = useState(agent.skills);
-  const [selectedMcp, setMcp] = useState(agent.mcpServers);
-  const toggle = (list: string[], value: string) => (list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
-  const save = useAction(() => api(p(projectId, `/agents/${agent.id}/capabilities`), { method: "PUT", body: { skillKeys: selectedSkills, mcpServerNames: selectedMcp } }), [["agents", projectId]]);
-  return (
-    <Drawer title={`${agent.name}: skill ve MCP`} onClose={onClose}>
-      <ErrorBox error={save.error} />
-      <p className="muted small">Skill ve MCP sunucuları organizasyon düzeyinde tanımlanır (Organizasyon → Skill & MCP).</p>
-      <div className="grid">
-        <section className="card stack"><h3>Skill'ler</h3>{skills.data?.map((s) => (
-          <label key={s.key} className="check"><input type="checkbox" checked={selectedSkills.includes(s.key)} onChange={() => setSkills(toggle(selectedSkills, s.key))} />{s.name} <span className="muted small">{s.key}</span></label>
-        ))}{skills.data?.length === 0 ? <span className="muted">Tanımlı skill yok.</span> : null}</section>
-        <section className="card stack"><h3>MCP sunucuları</h3>{mcp.data?.map((m) => (
-          <label key={m.name} className="check"><input type="checkbox" checked={selectedMcp.includes(m.name)} onChange={() => setMcp(toggle(selectedMcp, m.name))} />{m.name}</label>
-        ))}{mcp.data?.length === 0 ? <span className="muted">Tanımlı MCP sunucusu yok.</span> : null}</section>
-      </div>
-      <div className="row"><span className="spacer" /><button className="primary" disabled={save.busy} onClick={async () => { if (await save.run(undefined) !== undefined) onClose(); }}>Kaydet</button></div>
-      <SkillSuggestions projectId={projectId} />
-    </Drawer>
-  );
-}
+        {tab === "skills" ? <>
+          <p className="small muted" style={{ margin: 0 }}>Skill'ler bu agent'a özel Markdown talimatlarıdır (örn. "EF Core migration oluşturma", "API endpoint ekleme"). Etkin skill'ler her çalıştırmada agent'a verilir.</p>
+          {form.skills.map((s, i) => (
+            <div className="skill" key={i}>
+              <div className="skill-head">
+                <input aria-label="Skill adı" value={s.name} onChange={(e) => setSkill(i, { ...s, name: e.target.value })} placeholder="skill-adi" />
+                <label className="check small"><input type="checkbox" checked={s.enabled} onChange={(e) => setSkill(i, { ...s, enabled: e.target.checked })} /> etkin</label>
+                <button type="button" className="small ghost danger" onClick={() => set("skills", form.skills.filter((_, j) => j !== i))}>Sil</button>
+              </div>
+              <textarea aria-label={`${s.name} içeriği`} value={s.content} onChange={(e) => setSkill(i, { ...s, content: e.target.value })} />
+            </div>
+          ))}
+          <div><button type="button" onClick={() => set("skills", [...form.skills, { name: `skill-${form.skills.length + 1}`, content: SKILL_TEMPLATE, enabled: true }])}>
+            <Icon name="plus" /> Skill ekle</button></div>
+        </> : null}
 
-function SkillSuggestions({ projectId }: { projectId: string }) {
-  const suggestions = useGet<Array<{ key: string; name: string; description: string; reason: string }>>(["skill-suggestions", projectId], p(projectId, "/skill-suggestions"));
-  const catalog = useGet<{ skills: Array<{ key: string; name: string; description: string; content: string }> }>(["catalog"], "/api/catalog");
-  const install = useAction((key: string) => {
-    const skill = catalog.data!.skills.find((s) => s.key === key)!;
-    return api(`/api/skills/${key}`, { method: "PUT", body: { name: skill.name, description: skill.description, content: skill.content } });
-  }, [["skills"], ["skill-suggestions", projectId]]);
-  if (!suggestions.data?.length) return null;
-  return (
-    <section className="card">
-      <h3>Önerilen skill'ler</h3>
-      <p className="muted small">Repolardaki dosyalara göre önerildi.</p>
-      <ErrorBox error={install.error} /><Notice text={install.message} />
-      <table><tbody>{suggestions.data.map((s) => (
-        <tr key={s.key}><td><strong>{s.name}</strong><div className="small muted">{s.description}</div></td><td className="small muted">{s.reason}</td>
-          <td className="right"><button onClick={() => install.run(s.key, `${s.name} eklendi.`)}>Ekle</button></td></tr>
-      ))}</tbody></table>
-    </section>
-  );
-}
-
-function ProvisionTeam({ projectId, team, onClose }: { projectId: string; team: Team; onClose: () => void }) {
-  const skills = useGet<Skill[]>(["skills"], "/api/skills");
-  const [form, setForm] = useState<{ provider: ModelProvider; model: string; skillKeys: string[]; runtime: AgentRuntime }>({ provider: "Anthropic", model: "claude-sonnet-4-5", skillKeys: [], runtime: "Framework" });
-  const run = useAction(() => api<{ created: number }>(p(projectId, `/teams/${team.id}/provision-agents`), { body: form }), [["agents", projectId], ["teams", projectId]]);
-  return (
-    <Drawer title={`${team.name}: agent oluştur`} onClose={onClose}>
-      <ErrorBox error={run.error} /><Notice text={run.message} />
-      <p className="muted">Agent'ı olmayan {team.members.filter((m) => !m.agentId).length} üye için birer developer agent oluşturulur.</p>
-      <div className="form">
-        <RuntimeField value={form.runtime} onChange={(runtime) => setForm({
-          ...form, runtime, provider: RUNTIMES[runtime].provider ?? form.provider, model: runtime === "Framework" ? PROVIDERS[form.provider].example : RUNTIMES[runtime].model,
-        })} />
-        {form.runtime === "Framework" ? <Field label="Sağlayıcı">
-          <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as ModelProvider, model: PROVIDERS[e.target.value as ModelProvider].example })}>
-            {Object.entries(PROVIDERS).filter(([k]) => k !== "AzureOpenAI").map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-          </select>
-        </Field> : null}
-        <Field label="Model"><input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} /></Field>
-        <div className="stack"><strong className="small">Skill'ler</strong>{skills.data?.map((s) => (
-          <label key={s.key} className="check"><input type="checkbox" checked={form.skillKeys.includes(s.key)}
-            onChange={() => setForm({ ...form, skillKeys: form.skillKeys.includes(s.key) ? form.skillKeys.filter((k) => k !== s.key) : [...form.skillKeys, s.key] })} />{s.name}</label>
-        ))}</div>
-        <div className="row"><span className="spacer" /><button className="primary" disabled={run.busy} onClick={() => run.run(undefined, (r) => `${r.created} agent oluşturuldu.`)}>Oluştur</button></div>
+        {tab === "limits" ? (
+          <div className="form-3">
+            <Field label="Aynı anda en fazla çalıştırma"><input type="number" min={1} max={10} value={form.maxConcurrentRuns} onChange={(e) => set("maxConcurrentRuns", Number(e.target.value))} /></Field>
+            <Field label="Aylık bütçe (USD)" hint="Boş: limit yok"><input type="number" min={0} step="1" value={form.monthlyBudgetUsd ?? ""} onChange={(e) => set("monthlyBudgetUsd", e.target.value ? Number(e.target.value) : null)} /></Field>
+            <Field label="Çalıştırma başına en fazla maliyet (USD)"><input type="number" min={0.1} step="0.5" value={form.settings.maxCostPerRunUsd} onChange={(e) => setSettings("maxCostPerRunUsd", Number(e.target.value))} /></Field>
+            <Field label="En fazla adım"><input type="number" min={1} max={200} value={form.settings.maxIterations} onChange={(e) => setSettings("maxIterations", Number(e.target.value))} /></Field>
+            <Field label="En fazla token"><input type="number" min={10000} step={10000} value={form.settings.maxTokensPerRun} onChange={(e) => setSettings("maxTokensPerRun", Number(e.target.value))} /></Field>
+            <Field label="Zaman aşımı (dakika)"><input type="number" min={1} max={240} value={form.settings.timeoutMinutes} onChange={(e) => setSettings("timeoutMinutes", Number(e.target.value))} /></Field>
+            <Field label="Temperature" hint="Boş: model varsayılanı"><input type="number" min={0} max={2} step={0.1} value={form.settings.temperature ?? ""} onChange={(e) => setSettings("temperature", e.target.value ? Number(e.target.value) : null)} /></Field>
+          </div>
+        ) : null}
+      </fieldset>
+      <div className="row" style={{ marginTop: 20, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+        {agent?.canEdit ? <button className="danger" disabled={remove.busy} onClick={async () => { if (confirm(`${agent.name} silinsin mi?`) && await remove.run(undefined)) onClose(); }}>Sil</button> : null}
+        <span className="spacer" />
+        <button onClick={onClose}>Kapat</button>
+        {!readOnly ? <button className="primary" disabled={save.busy || !form.name.trim() || !model} onClick={async () => { if (await save.run(undefined)) onClose(); }}>{agent ? "Kaydet" : "Oluştur"}</button> : null}
       </div>
-    </Drawer>
+    </Modal>
   );
 }

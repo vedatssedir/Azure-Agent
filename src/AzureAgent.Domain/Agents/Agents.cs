@@ -29,25 +29,44 @@ public enum AgentKind
     Reviewer = 1,
 }
 
+/// <summary>
+/// An agent definition (like a Paperclip agent): who owns it, what drives it (runtime, model), how it
+/// behaves (instructions) and what it knows (its own skills). A developer can own several agents;
+/// one of them is their default for work assigned to them. Items tagged <c>agent:&lt;slug&gt;</c> go
+/// to that agent directly.
+/// </summary>
 public sealed class Agent : Entity, IOrganizationScoped
 {
     public Guid OrganizationId { get; init; }
-    public Guid ProjectId { get; init; }
+    /// <summary>Developer the agent works for (its permissions apply). Null = shared agent managed by admins (e.g. the reviewer).</summary>
+    public Guid? OwnerUserId { get; set; }
+    /// <summary>Limit the agent to one project; null = every project its owner can work on.</summary>
+    public Guid? ProjectId { get; set; }
     public required string Name { get; set; }
+    /// <summary>Lowercase identifier used in work item tags (agent:&lt;slug&gt;), unique in the organization.</summary>
+    public required string Slug { get; set; }
+    /// <summary>Short role description shown on the agent card (e.g. "Backend developer").</summary>
+    public string? Title { get; set; }
     public AgentKind Kind { get; set; }
     public ModelProvider Provider { get; set; }
     public AgentRuntime Runtime { get; set; }
     public required string Model { get; set; }
     public string Instructions { get; set; } = "";
-    /// <summary>Work items assigned to this Azure identity are handed to this agent (developer agents).</summary>
-    public string? PairedUniqueName { get; set; }
-    public Guid? TeamId { get; set; }
+    /// <summary>The owner's default agent: work assigned to the owner starts here.</summary>
+    public bool IsDefault { get; set; }
     public bool Enabled { get; set; } = true;
     public int MaxConcurrentRuns { get; set; } = 1;
     public decimal? MonthlyBudgetUsd { get; set; }
     public AgentSettings Settings { get; set; } = new();
+    /// <summary>The agent's own skills (Markdown), added to its instructions on every run.</summary>
     public List<AgentSkill> Skills { get; set; } = [];
-    public List<AgentMcpServer> McpServers { get; set; } = [];
+}
+
+public sealed class AgentSkill
+{
+    public required string Name { get; set; }
+    public required string Content { get; set; }
+    public bool Enabled { get; set; } = true;
 }
 
 public sealed class AgentSettings
@@ -62,45 +81,4 @@ public sealed class AgentSettings
     public int TimeoutMinutes { get; set; } = 45;
     /// <summary>Azure OpenAI endpoint, or another OpenAI-compatible base URL.</summary>
     public string? Endpoint { get; set; }
-}
-
-/// <summary>Reusable instructions (Markdown) that can be attached to agents.</summary>
-public sealed class Skill : Entity, IOrganizationScoped
-{
-    public Guid OrganizationId { get; init; }
-    /// <summary>Lowercase key, unique in the organization.</summary>
-    public required string Key { get; init; }
-    public required string Name { get; set; }
-    public string Description { get; set; } = "";
-    public required string Content { get; set; }
-}
-
-public sealed class AgentSkill
-{
-    public Guid AgentId { get; init; }
-    public Guid SkillId { get; init; }
-}
-
-public enum McpTransport
-{
-    Stdio = 0,
-    Http = 1,
-}
-
-public sealed class McpServer : Entity, IOrganizationScoped
-{
-    public Guid OrganizationId { get; init; }
-    public required string Name { get; init; }
-    public McpTransport Transport { get; set; }
-    public string? Command { get; set; }
-    public List<string> Arguments { get; set; } = [];
-    public string? Url { get; set; }
-    /// <summary>Secrets passed to the server as environment variables / headers.</summary>
-    public List<string> SecretNames { get; set; } = [];
-}
-
-public sealed class AgentMcpServer
-{
-    public Guid AgentId { get; init; }
-    public Guid McpServerId { get; init; }
 }

@@ -3,6 +3,8 @@ import { render } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi } from "vitest";
+import { AppContext, type AppState } from "../context";
+import { app as defaultApp } from "./fixtures";
 
 export interface Call { method: string; path: string; body: unknown; headers: Record<string, string> }
 
@@ -33,13 +35,16 @@ export function mockApi(routes: Record<string, Handler>) {
   return calls;
 }
 
-export function renderPage(ui: ReactNode, { path = "/", route = "/" }: { path?: string; route?: string } = {}) {
+/** Renders a page inside the router, query client and signed-in app state (override with `app`). */
+export function renderPage(ui: ReactNode, { path = "/", route = "/", app = defaultApp }: { path?: string; route?: string; app?: AppState } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[path]}>
-        <Routes><Route path={route} element={ui} /></Routes>
-      </MemoryRouter>
+      <AppContext.Provider value={app}>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes><Route path={route} element={ui} /></Routes>
+        </MemoryRouter>
+      </AppContext.Provider>
     </QueryClientProvider>,
   );
 }

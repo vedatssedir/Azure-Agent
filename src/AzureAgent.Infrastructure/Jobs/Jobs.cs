@@ -14,18 +14,18 @@ namespace AzureAgent.Infrastructure.Jobs;
 /// </summary>
 public sealed class ScheduledJobs(IAppDbContext db, ITenantContext tenant, IMessageBus bus, IClock clock, ILogger<ScheduledJobs> logger)
 {
-    [TickerFunction("project-sync", "0 * * * * *")]
-    public async Task SyncDueProjects(TickerFunctionContext context, CancellationToken ct)
+    /// <summary>Every connected organization is synced on its interval (projects, then each project's boards, repos and people).</summary>
+    [TickerFunction("organization-sync", "0 * * * * *")]
+    public async Task SyncDueOrganizations(TickerFunctionContext context, CancellationToken ct)
     {
         tenant.UseAllOrganizations();
         var now = clock.UtcNow;
-        var projects = await db.Projects.AsNoTracking().Select(p => new { p.Id, p.OrganizationId, p.LastSyncedAt, p.Settings.SyncIntervalMinutes }).ToListAsync(ct);
-        var hasPat = (await db.Secrets.AsNoTracking().Where(s => s.Name == Domain.Projects.SecretNames.AzureDevOpsPat).Select(s => new { s.OrganizationId, s.ProjectId }).ToListAsync(ct));
-        foreach (var project in projects)
+        var organizations = await db.Organizations.AsNoTracking().Where(o => o.AzureOrganizationUrl != null)
+            .Select(o => new { o.Id, o.LastSyncedAt, o.Settings.SyncIntervalMinutes }).ToListAsync(ct);
+        foreach (var organization in organizations)
         {
-            if (!hasPat.Any(s => s.OrganizationId == project.OrganizationId && (s.ProjectId == project.Id || s.ProjectId == null))) continue;
-            if (project.LastSyncedAt is { } last && now - last < TimeSpan.FromMinutes(project.SyncIntervalMinutes)) continue;
-            await bus.PublishAsync(new SyncProject(project.OrganizationId, project.Id, "schedule"));
+            if (organization.LastSyncedAt is { } last && now - last < TimeSpan.FromMinutes(organization.SyncIntervalMinutes)) continue;
+            await bus.PublishAsync(new SyncOrganization(organization.Id, "schedule"));
         }
     }
 

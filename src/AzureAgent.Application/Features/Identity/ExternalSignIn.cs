@@ -70,8 +70,8 @@ public static class CompleteExternalSignInHandler
             var now = clock.UtcNow;
             var invited = await db.Invitations.AnyAsync(i => i.Email == email && i.AcceptedAt == null && i.RevokedAt == null && i.ExpiresAt > now, ct);
             var inTeam = (await db.Teams.AsNoTracking().ToListAsync(ct)).Any(t => t.Members.Any(m => m.UniqueName.Equals(email, StringComparison.OrdinalIgnoreCase)));
-            var inGroup = identity.Groups.Count > 0 && (await db.Projects.AsNoTracking().ToListAsync(ct))
-                .Any(p => MembershipProvisioner.GroupRole(p.Settings, identity.Groups) is not null);
+            var inGroup = identity.Groups.Count > 0 && (await db.Organizations.AsNoTracking().Select(o => o.Settings).ToListAsync(ct))
+                .Any(settings => MembershipProvisioner.GroupRole(settings, identity.Groups) is not null);
             if (!invited && !inTeam && !inGroup)
             {
                 logger.LogInformation("Rejected Entra ID sign-in of {Email}: not invited, not in an Azure team or mapped group", email);

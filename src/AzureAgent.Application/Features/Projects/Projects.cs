@@ -7,15 +7,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AzureAgent.Application.Features.Projects;
 
-public sealed record ProjectDto(Guid Id, string Name, string Key, string? Description, string AzureOrganizationUrl, string AzureProjectName,
-    ProjectSettings Settings, decimal? MonthlyBudgetUsd, DateTimeOffset? LastSyncedAt, string? LastSyncError, IReadOnlyCollection<string> MyPermissions);
-
-internal static class ProjectMapping
-{
-    public static ProjectDto ToDto(this Project p, IReadOnlySet<string> permissions) =>
-        new(p.Id, p.Name, p.Key, p.Description, p.AzureOrganizationUrl, p.AzureProjectName, p.Settings, p.MonthlyBudgetUsd,
-            p.LastSyncedAt, p.LastSyncError, permissions.Order().ToList());
-}
+public sealed record ProjectDto(Guid Id, string Name, string Key, string? Description, string AzureProjectName, string WebUrl, DateTimeOffset? LastSyncedAt,
+    string? LastSyncError, ProjectRole? MyRole, IReadOnlyCollection<string> MyPermissions, int OpenWorkItems, int AssignedToMe, int Repositories, int Teams,
+    decimal? MonthlyBudgetUsd);
 
 public sealed class AzureUrlValidator : AbstractValidator<string>
 {
@@ -27,64 +21,46 @@ public sealed class AzureUrlValidator : AbstractValidator<string>
     }
 }
 
-// Create ----------------------------------------------------------------------------------
-
-public sealed record CreateProjectCommand(string Name, string Key, string? Description, string AzureOrganizationUrl, string AzureProjectName,
-    decimal? MonthlyBudgetUsd);
-
-public sealed class CreateProjectCommandValidator : AbstractValidator<CreateProjectCommand>
+internal static class ProjectQueries
 {
-    public CreateProjectCommandValidator()
+    public static async Task<IReadOnlyList<ProjectDto>> ListAsync(IAppDbContext db, AccessControl access, ICurrentUser user, Guid? projectId, CancellationToken ct)
     {
-        RuleFor(x => x.Name).NotEmpty().MaximumLength(100);
-        RuleFor(x => x.Key).NotEmpty().Matches("^[A-Z][A-Z0-9]{1,9}$").WithMessage("Key must be 2-10 uppercase letters or digits");
-        RuleFor(x => x.Description).MaximumLength(2000);
-        RuleFor(x => x.AzureOrganizationUrl).SetValidator(new AzureUrlValidator());
-        RuleFor(x => x.AzureProjectName).NotEmpty().MaximumLength(200);
-        RuleFor(x => x.MonthlyBudgetUsd).GreaterThanOrEqualTo(0).When(x => x.MonthlyBudgetUsd.HasValue);
-    }
-}
-
-public static class CreateProjectHandler
-{
-    public static async Task<ProjectDto> Handle(CreateProjectCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
-    {
-        await access.RequireOrganizationAdminAsync(ct);
-        var organizationId = access.RequireOrganization();
-        if (await db.Projects.AnyAsync(p => p.Key == command.Key, ct)) throw new ConflictException($"Project key {command.Key} is already used");
-        var project = new Project
+        var userId = access.RequireUser();
+        var projects = await db.Projects.AsNoTracking().Where(p => !p.IsRemoved && (projectId == null || p.Id == projectId)).OrderBy(p => p.Name).ToListAsync(ct);
+        var roles = await db.ProjectMembers.AsNoTracking().Where(m => m.UserId == userId).ToDictionaryAsync(m => m.ProjectId, ct);
+        var ids = projects.Select(p => p.Id).ToList();
+        var items = await db.WorkItems.AsNoTracking().Where(w => ids.Contains(w.ProjectId))
+            .Select(w => new { w.ProjectId, w.Type, w.State, w.AssignedToUniqueName }).ToListAsync(ct);
+        var repos = await db.Repositories.AsNoTracking().Where(r => ids.Contains(r.ProjectId) && !r.IsRemoved).GroupBy(r => r.ProjectId)
+            .Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+        var teams = await db.Teams.AsNoTracking().Where(t => ids.Contains(t.ProjectId)).GroupBy(t => t.ProjectId)
+            .Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+        var result = new List<ProjectDto>();
+        foreach (var project in projects)
         {
-            OrganizationId = organizationId,
-            Name = command.Name.Trim(),
-            Key = command.Key,
-            Description = command.Description,
-            AzureOrganizationUrl = command.AzureOrganizationUrl.TrimEnd('/'),
-            AzureProjectName = command.AzureProjectName.Trim(),
-            MonthlyBudgetUsd = command.MonthlyBudgetUsd,
-        };
-        db.Projects.Add(project);
-        db.Audit(user, organizationId, "project.created", "project", project.Id, new { project.Key }, project.Id);
-        await db.SaveChangesAsync(ct);
-        return project.ToDto(Permission.All.ToHashSet());
+            var permissions = await access.PermissionsAsync(project.Id, null, ct);
+            if (!permissions.Contains(Permission.ProjectView)) continue;
+            var member = roles.GetValueOrDefault(project.Id);
+            var me = member?.AzureUniqueName ?? user.Email;
+            var open = items.Where(i => i.ProjectId == project.Id && !project.IsClosedState(i.Type, i.State)).ToList();
+            result.Add(new ProjectDto(project.Id, project.Name, project.Key, project.Description, project.AzureProjectName,
+                $"{project.AzureOrganizationUrl.TrimEnd('/')}/{Uri.EscapeDataString(project.AzureProjectName)}", project.LastSyncedAt, project.LastSyncError,
+                member?.Role, permissions.Order().ToList(), open.Count, open.Count(i => i.AssignedToUniqueName == me), repos.GetValueOrDefault(project.Id),
+                teams.GetValueOrDefault(project.Id), project.MonthlyBudgetUsd));
+        }
+        return result;
     }
 }
 
-// Read ------------------------------------------------------------------------------------
-
+/// <summary>The synced Azure DevOps projects the caller can see.</summary>
 public sealed record ListProjectsQuery;
 
 public static class ListProjectsHandler
 {
-    public static async Task<IReadOnlyList<ProjectDto>> Handle(ListProjectsQuery _, IAppDbContext db, AccessControl access, CancellationToken ct)
+    public static Task<IReadOnlyList<ProjectDto>> Handle(ListProjectsQuery _, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
     {
         access.RequireOrganization();
-        var result = new List<ProjectDto>();
-        foreach (var project in await db.Projects.AsNoTracking().OrderBy(p => p.Name).ToListAsync(ct))
-        {
-            var permissions = await access.PermissionsAsync(project.Id, null, ct);
-            if (permissions.Contains(Permission.ProjectView)) result.Add(project.ToDto(permissions));
-        }
-        return result;
+        return ProjectQueries.ListAsync(db, access, user, null, ct);
     }
 }
 
@@ -92,84 +68,14 @@ public sealed record GetProjectQuery(Guid ProjectId);
 
 public static class GetProjectHandler
 {
-    public static async Task<ProjectDto> Handle(GetProjectQuery query, IAppDbContext db, AccessControl access, CancellationToken ct)
+    public static async Task<ProjectDto> Handle(GetProjectQuery query, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
     {
         await access.RequireAsync(query.ProjectId, Permission.ProjectView, ct);
-        var project = await db.Projects.AsNoTracking().FirstAsync(p => p.Id == query.ProjectId, ct);
-        return project.ToDto(await access.PermissionsAsync(project.Id, null, ct));
+        return (await ProjectQueries.ListAsync(db, access, user, query.ProjectId, ct)).SingleOrDefault() ?? throw new NotFoundException("Project");
     }
 }
 
-// Update ----------------------------------------------------------------------------------
-
-public sealed record UpdateProjectCommand(Guid ProjectId, string Name, string? Description, string AzureOrganizationUrl, string AzureProjectName,
-    decimal? MonthlyBudgetUsd, ProjectSettings Settings);
-
-public sealed class UpdateProjectCommandValidator : AbstractValidator<UpdateProjectCommand>
-{
-    public UpdateProjectCommandValidator()
-    {
-        RuleFor(x => x.Name).NotEmpty().MaximumLength(100);
-        RuleFor(x => x.Description).MaximumLength(2000);
-        RuleFor(x => x.AzureOrganizationUrl).SetValidator(new AzureUrlValidator());
-        RuleFor(x => x.AzureProjectName).NotEmpty().MaximumLength(200);
-        RuleFor(x => x.MonthlyBudgetUsd).GreaterThanOrEqualTo(0).When(x => x.MonthlyBudgetUsd.HasValue);
-        RuleFor(x => x.Settings).NotNull();
-        RuleFor(x => x.Settings.SyncIntervalMinutes).InclusiveBetween(1, 1440);
-        RuleFor(x => x.Settings.ReviewState).MaximumLength(50);
-        RuleForEach(x => x.Settings.ClosedStates).NotEmpty().MaximumLength(50);
-        RuleForEach(x => x.Settings.TeamRoles).ChildRules(m =>
-        {
-            m.RuleFor(x => x.Team).NotEmpty().MaximumLength(200);
-            m.RuleFor(x => x.Role).IsInEnum();
-        });
-        RuleForEach(x => x.Settings.GroupRoles).ChildRules(m =>
-        {
-            m.RuleFor(x => x.GroupId).NotEmpty().Matches("^[0-9a-fA-F-]{36}$").WithMessage("Use the Entra ID group object id");
-            m.RuleFor(x => x.Role).IsInEnum();
-        });
-    }
-}
-
-public static class UpdateProjectHandler
-{
-    public static async Task<ProjectDto> Handle(UpdateProjectCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
-    {
-        await access.RequireAsync(command.ProjectId, Permission.SettingsManage, ct);
-        var permissions = await access.PermissionsAsync(command.ProjectId, null, ct);
-        var project = await db.Projects.FirstAsync(p => p.Id == command.ProjectId, ct);
-        if (command.MonthlyBudgetUsd != project.MonthlyBudgetUsd && !permissions.Contains(Permission.BudgetsManage))
-            throw new ForbiddenException($"Missing permission '{Permission.BudgetsManage}'");
-        project.Name = command.Name.Trim();
-        project.Description = command.Description;
-        project.AzureOrganizationUrl = command.AzureOrganizationUrl.TrimEnd('/');
-        project.AzureProjectName = command.AzureProjectName.Trim();
-        project.MonthlyBudgetUsd = command.MonthlyBudgetUsd;
-        project.Settings = command.Settings;
-        db.Audit(user, project.OrganizationId, "project.updated", "project", project.Id, new { command.Settings, command.MonthlyBudgetUsd }, project.Id);
-        await db.SaveChangesAsync(ct);
-        return project.ToDto(permissions);
-    }
-}
-
-// Members ---------------------------------------------------------------------------------
-
-public sealed record ProjectMemberDto(Guid UserId, string Email, string DisplayName, ProjectRole Role, string? AzureUniqueName,
-    MembershipSource Source = MembershipSource.Manual);
-
-public sealed record ListProjectMembersQuery(Guid ProjectId);
-
-public static class ListProjectMembersHandler
-{
-    public static async Task<IReadOnlyList<ProjectMemberDto>> Handle(ListProjectMembersQuery query, IAppDbContext db, AccessControl access, CancellationToken ct)
-    {
-        await access.RequireAsync(query.ProjectId, Permission.ProjectView, ct);
-        return await db.ProjectMembers.AsNoTracking().Where(m => m.ProjectId == query.ProjectId)
-            .Join(db.Users, m => m.UserId, u => u.Id, (m, u) => new { m, u })
-            .OrderBy(x => x.u.DisplayName)
-            .Select(x => new ProjectMemberDto(x.u.Id, x.u.Email, x.u.DisplayName, x.m.Role, x.m.AzureUniqueName, x.m.Source)).ToListAsync(ct);
-    }
-}
+// Project roles (managed from Settings → Users) ------------------------------------------------------------
 
 public sealed record SetProjectMemberCommand(Guid ProjectId, Guid UserId, ProjectRole Role, string? AzureUniqueName);
 
@@ -185,7 +91,7 @@ public sealed class SetProjectMemberCommandValidator : AbstractValidator<SetProj
 
 public static class SetProjectMemberHandler
 {
-    public static async Task<ProjectMemberDto> Handle(SetProjectMemberCommand command, IAppDbContext db, AccessControl access, ICurrentUser current, CancellationToken ct)
+    public static async Task Handle(SetProjectMemberCommand command, IAppDbContext db, AccessControl access, ICurrentUser current, CancellationToken ct)
     {
         await access.RequireAsync(command.ProjectId, Permission.MembersManage, ct);
         var organizationId = access.RequireOrganization();
@@ -196,8 +102,10 @@ public static class SetProjectMemberHandler
         var member = await db.ProjectMembers.FirstOrDefaultAsync(m => m.ProjectId == command.ProjectId && m.UserId == command.UserId, ct);
         if (member is null)
         {
-            member = new ProjectMember { OrganizationId = organizationId, ProjectId = command.ProjectId, UserId = command.UserId, Role = command.Role, AzureUniqueName = azureName };
-            db.ProjectMembers.Add(member);
+            db.ProjectMembers.Add(new ProjectMember
+            {
+                OrganizationId = organizationId, ProjectId = command.ProjectId, UserId = command.UserId, Role = command.Role, AzureUniqueName = azureName,
+            });
         }
         else
         {
@@ -208,7 +116,6 @@ public static class SetProjectMemberHandler
         }
         db.Audit(current, organizationId, "project.member.saved", "user", command.UserId, new { command.Role, azureName }, command.ProjectId);
         await db.SaveChangesAsync(ct);
-        return new ProjectMemberDto(user.Id, user.Email, user.DisplayName, command.Role, azureName);
     }
 }
 
@@ -227,32 +134,9 @@ public static class RemoveProjectMemberHandler
     }
 }
 
-// Repository security ---------------------------------------------------------------------------
+// Repository security (Settings → Repositories) -----------------------------------------------------------
 
-public sealed record RepositoryDto(Guid Id, string Name, string? DefaultBranch, string WebUrl, RepositoryPolicy Policy, int OpenPullRequests, DateTimeOffset? LastCommitAt);
-
-public sealed record ListRepositoriesQuery(Guid ProjectId);
-
-public static class ListRepositoriesHandler
-{
-    public static async Task<IReadOnlyList<RepositoryDto>> Handle(ListRepositoriesQuery query, IAppDbContext db, AccessControl access, CancellationToken ct)
-    {
-        await access.RequireAsync(query.ProjectId, Permission.ProjectView, ct);
-        var repos = await db.Repositories.AsNoTracking().Where(r => r.ProjectId == query.ProjectId).OrderBy(r => r.Name)
-            .Select(r => new RepositoryDto(r.Id, r.Name, r.DefaultBranch, r.WebUrl, r.Policy,
-                db.PullRequests.Count(p => p.RepositoryId == r.Id && p.Status == PullRequestStatus.Active),
-                db.Commits.Where(c => c.RepositoryId == r.Id).Max(c => (DateTimeOffset?)c.CommittedAt)))
-            .ToListAsync(ct);
-        var visible = new List<RepositoryDto>();
-        foreach (var repo in repos)
-        {
-            if ((await access.PermissionsAsync(query.ProjectId, repo.Id, ct)).Contains(Permission.RepositoryView)) visible.Add(repo);
-        }
-        return visible;
-    }
-}
-
-public sealed record UpdateRepositoryPolicyCommand(Guid ProjectId, Guid RepositoryId, RepositoryPolicy Policy);
+public sealed record UpdateRepositoryPolicyCommand(Guid RepositoryId, RepositoryPolicy Policy);
 
 public sealed class UpdateRepositoryPolicyCommandValidator : AbstractValidator<UpdateRepositoryPolicyCommand>
 {
@@ -269,30 +153,31 @@ public static class UpdateRepositoryPolicyHandler
 {
     public static async Task Handle(UpdateRepositoryPolicyCommand command, IAppDbContext db, AccessControl access, ICurrentUser current, CancellationToken ct)
     {
-        await access.RequireAsync(command.ProjectId, Permission.RepositoryPolicyManage, ct, command.RepositoryId);
-        var repo = await db.Repositories.FirstOrDefaultAsync(r => r.Id == command.RepositoryId && r.ProjectId == command.ProjectId, ct)
-            ?? throw new NotFoundException("Repository");
+        var repo = await db.Repositories.FirstOrDefaultAsync(r => r.Id == command.RepositoryId, ct) ?? throw new NotFoundException("Repository");
+        await access.RequireAsync(repo.ProjectId, Permission.RepositoryPolicyManage, ct, repo.Id);
         repo.Policy = command.Policy;
-        db.Audit(current, repo.OrganizationId, "repository.policy.updated", "repository", repo.Id, command.Policy, command.ProjectId);
+        db.Audit(current, repo.OrganizationId, "repository.policy.updated", "repository", repo.Id, command.Policy, repo.ProjectId);
         await db.SaveChangesAsync(ct);
     }
 }
 
-public sealed record RepositoryAccessRuleDto(Guid Id, Guid? UserId, ProjectRole? Role, string Permission, AccessEffect Effect);
+public sealed record RepositoryAccessRuleDto(Guid Id, Guid? UserId, string? UserName, ProjectRole? Role, string Permission, AccessEffect Effect);
 
-public sealed record ListRepositoryAccessRulesQuery(Guid ProjectId, Guid RepositoryId);
+public sealed record ListRepositoryAccessRulesQuery(Guid RepositoryId);
 
 public static class ListRepositoryAccessRulesHandler
 {
     public static async Task<IReadOnlyList<RepositoryAccessRuleDto>> Handle(ListRepositoryAccessRulesQuery query, IAppDbContext db, AccessControl access, CancellationToken ct)
     {
-        await access.RequireAsync(query.ProjectId, Permission.RepositoryPolicyManage, ct, query.RepositoryId);
+        var repo = await db.Repositories.AsNoTracking().FirstOrDefaultAsync(r => r.Id == query.RepositoryId, ct) ?? throw new NotFoundException("Repository");
+        await access.RequireAsync(repo.ProjectId, Permission.RepositoryPolicyManage, ct, repo.Id);
         return await db.RepositoryAccessRules.AsNoTracking().Where(r => r.RepositoryId == query.RepositoryId)
-            .Select(r => new RepositoryAccessRuleDto(r.Id, r.UserId, r.Role, r.Permission, r.Effect)).ToListAsync(ct);
+            .Select(r => new RepositoryAccessRuleDto(r.Id, r.UserId, db.Users.Where(u => u.Id == r.UserId).Select(u => u.DisplayName).FirstOrDefault(), r.Role,
+                r.Permission, r.Effect)).ToListAsync(ct);
     }
 }
 
-public sealed record AddRepositoryAccessRuleCommand(Guid ProjectId, Guid RepositoryId, Guid? UserId, ProjectRole? Role, string Permission, AccessEffect Effect);
+public sealed record AddRepositoryAccessRuleCommand(Guid RepositoryId, Guid? UserId, ProjectRole? Role, string Permission, AccessEffect Effect);
 
 public sealed class AddRepositoryAccessRuleCommandValidator : AbstractValidator<AddRepositoryAccessRuleCommand>
 {
@@ -309,32 +194,33 @@ public static class AddRepositoryAccessRuleHandler
 {
     public static async Task<RepositoryAccessRuleDto> Handle(AddRepositoryAccessRuleCommand command, IAppDbContext db, AccessControl access, ICurrentUser current, CancellationToken ct)
     {
-        await access.RequireAsync(command.ProjectId, Permission.RepositoryPolicyManage, ct, command.RepositoryId);
-        var repo = await db.Repositories.AsNoTracking().FirstOrDefaultAsync(r => r.Id == command.RepositoryId && r.ProjectId == command.ProjectId, ct)
-            ?? throw new NotFoundException("Repository");
+        var repo = await db.Repositories.AsNoTracking().FirstOrDefaultAsync(r => r.Id == command.RepositoryId, ct) ?? throw new NotFoundException("Repository");
+        await access.RequireAsync(repo.ProjectId, Permission.RepositoryPolicyManage, ct, repo.Id);
         var rule = new RepositoryAccessRule
         {
             OrganizationId = repo.OrganizationId, RepositoryId = repo.Id, UserId = command.UserId, Role = command.Role,
             Permission = command.Permission, Effect = command.Effect,
         };
         db.RepositoryAccessRules.Add(rule);
-        db.Audit(current, repo.OrganizationId, "repository.access_rule.added", "repository", repo.Id, command, command.ProjectId);
+        db.Audit(current, repo.OrganizationId, "repository.access_rule.added", "repository", repo.Id, command, repo.ProjectId);
         await db.SaveChangesAsync(ct);
-        return new RepositoryAccessRuleDto(rule.Id, rule.UserId, rule.Role, rule.Permission, rule.Effect);
+        var name = command.UserId is { } id ? await db.Users.Where(u => u.Id == id).Select(u => u.DisplayName).FirstOrDefaultAsync(ct) : null;
+        return new RepositoryAccessRuleDto(rule.Id, rule.UserId, name, rule.Role, rule.Permission, rule.Effect);
     }
 }
 
-public sealed record RemoveRepositoryAccessRuleCommand(Guid ProjectId, Guid RepositoryId, Guid RuleId);
+public sealed record RemoveRepositoryAccessRuleCommand(Guid RepositoryId, Guid RuleId);
 
 public static class RemoveRepositoryAccessRuleHandler
 {
     public static async Task Handle(RemoveRepositoryAccessRuleCommand command, IAppDbContext db, AccessControl access, ICurrentUser current, CancellationToken ct)
     {
-        await access.RequireAsync(command.ProjectId, Permission.RepositoryPolicyManage, ct, command.RepositoryId);
         var rule = await db.RepositoryAccessRules.FirstOrDefaultAsync(r => r.Id == command.RuleId && r.RepositoryId == command.RepositoryId, ct)
             ?? throw new NotFoundException("Access rule");
+        var repo = await db.Repositories.AsNoTracking().FirstAsync(r => r.Id == rule.RepositoryId, ct);
+        await access.RequireAsync(repo.ProjectId, Permission.RepositoryPolicyManage, ct, repo.Id);
         db.RepositoryAccessRules.Remove(rule);
-        db.Audit(current, rule.OrganizationId, "repository.access_rule.removed", "repository", rule.RepositoryId, new { rule.Permission }, command.ProjectId);
+        db.Audit(current, rule.OrganizationId, "repository.access_rule.removed", "repository", rule.RepositoryId, new { rule.Permission }, repo.ProjectId);
         await db.SaveChangesAsync(ct);
     }
 }

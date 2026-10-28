@@ -73,12 +73,14 @@ public sealed class AzureMappingTests
     }
 
     [Fact]
-    public void Reconciliation_query_covers_open_items_and_recent_changes()
+    public void Reconciliation_query_imports_open_items_and_history_first_then_only_changes()
     {
-        var query = WorkItemMapping.ReconciliationQuery(new DateTimeOffset(2026, 10, 20, 8, 0, 0, TimeSpan.Zero), ["Closed", "O'Brien"]);
-        query.ShouldContain("[System.ChangedDate] >= '2026-10-20'");
-        query.ShouldContain("NOT IN ('Closed', 'O''Brien')");
-        WorkItemMapping.ReconciliationQuery(null, ["Closed"]).ShouldContain("@today - 90");
+        var first = WorkItemMapping.ReconciliationQuery(null, ["Closed", "O'Brien"]);
+        first.ShouldContain("@today - 365");
+        first.ShouldContain("NOT IN ('Closed', 'O''Brien')");
+        var next = WorkItemMapping.ReconciliationQuery(new DateTimeOffset(2026, 10, 20, 8, 0, 0, TimeSpan.Zero), ["Closed"]);
+        next.ShouldContain("[System.ChangedDate] >= '2026-10-19'"); // a day of overlap absorbs clock skew
+        next.ShouldNotContain("NOT IN");
     }
 
     [Fact]
@@ -147,16 +149,17 @@ public sealed class ValidationTests
     [Fact]
     public void Passwords_must_be_strong()
     {
-        new SetupCommandValidator().Validate(new SetupCommand("a@b.co", "A", "weakpass", "Org")).Errors
+        new SetupCommandValidator().Validate(new SetupCommand("a@b.co", "A", "weakpass", "https://dev.azure.com/contoso", "abcdefghijklmnopqrstuvwxyz0123")).Errors
             .Select(e => e.ErrorMessage).ShouldContain("Password must contain an uppercase letter");
-        new SetupCommandValidator().Validate(new SetupCommand("a@b.co", "A", "Str0ngPassword", "Org")).IsValid.ShouldBeTrue();
+        new SetupCommandValidator().Validate(new SetupCommand("a@b.co", "A", "Str0ngPassword", "https://dev.azure.com/contoso", "abcdefghijklmnopqrstuvwxyz0123")).IsValid.ShouldBeTrue();
     }
 
     [Fact]
-    public void Projects_require_an_azure_devops_url_and_key()
+    public void Setup_requires_an_azure_devops_organization_url_and_a_pat()
     {
-        var result = new CreateProjectCommandValidator().Validate(new CreateProjectCommand("Shop", "shop", null, "https://github.com/x", "Shop", -1));
-        result.Errors.Select(e => e.PropertyName).ShouldBe(["Key", "AzureOrganizationUrl", "MonthlyBudgetUsd"], ignoreOrder: true);
-        new CreateProjectCommandValidator().Validate(new CreateProjectCommand("Shop", "SHOP", null, "https://dev.azure.com/contoso", "Shop", 100)).IsValid.ShouldBeTrue();
+        var result = new SetupCommandValidator().Validate(new SetupCommand("a@b.co", "A", "Str0ngPassword", "https://github.com/x", "not a pat!"));
+        result.Errors.Select(e => e.PropertyName).Distinct().ShouldBe(["AzureOrganizationUrl", "PersonalAccessToken"], ignoreOrder: true);
+        new AzureUrlValidator().Validate("https://contoso.visualstudio.com").IsValid.ShouldBeTrue();
+        new AzureUrlValidator().Validate("https://dev.azure.com/contoso/Project").IsValid.ShouldBeFalse();
     }
 }

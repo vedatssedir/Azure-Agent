@@ -106,14 +106,14 @@ public sealed class ProvisioningRuleTests
     [Fact]
     public void Without_mappings_every_team_member_is_a_developer()
     {
-        var roles = MembershipProvisioner.DesiredRoles(new ProjectSettings(), [Team("Backend", "A@x.com"), Team("QA", "b@x.com")]);
+        var roles = MembershipProvisioner.DesiredRoles(new OrganizationSettings(), [Team("Backend", "A@x.com"), Team("QA", "b@x.com")]);
         roles.ShouldBe(new Dictionary<string, ProjectRole> { ["a@x.com"] = ProjectRole.Developer, ["b@x.com"] = ProjectRole.Developer });
     }
 
     [Fact]
     public void Mapped_teams_only_and_the_highest_role_wins()
     {
-        var settings = new ProjectSettings
+        var settings = new OrganizationSettings
         {
             TeamRoles = [new TeamRoleMapping { Team = "backend", Role = ProjectRole.Developer }, new TeamRoleMapping { Team = "Leads", Role = ProjectRole.Maintainer }],
         };
@@ -124,7 +124,7 @@ public sealed class ProvisioningRuleTests
     [Fact]
     public void Group_role_matches_object_ids_case_insensitively()
     {
-        var settings = new ProjectSettings { GroupRoles = [new GroupRoleMapping { GroupId = "abc", Role = ProjectRole.Reviewer }] };
+        var settings = new OrganizationSettings { GroupRoles = [new GroupRoleMapping { GroupId = "abc", Role = ProjectRole.Reviewer }] };
         MembershipProvisioner.GroupRole(settings, ["ABC"]).ShouldBe(ProjectRole.Reviewer);
         MembershipProvisioner.GroupRole(settings, ["other"]).ShouldBeNull();
     }
@@ -132,7 +132,7 @@ public sealed class ProvisioningRuleTests
     [Fact]
     public void Team_board_matches_area_paths_and_children()
     {
-        var filter = ListWorkItemsHandler.TeamAreaFilter([new TeamArea { Path = @"Shop\Web", IncludeChildren = true }, new TeamArea { Path = @"Shop\Ops" }]).Compile();
+        var filter = WorkItemProjection.TeamAreaFilter([new TeamArea { Path = @"Shop\Web", IncludeChildren = true }, new TeamArea { Path = @"Shop\Ops" }]).Compile();
         WorkItem Item(string? area) => new() { Type = "", Title = "", State = "", WebUrl = "", AreaPath = area };
         filter(Item(@"Shop\Web")).ShouldBeTrue();
         filter(Item(@"Shop\Web\Checkout")).ShouldBeTrue();

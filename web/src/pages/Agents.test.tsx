@@ -1,40 +1,44 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Agents } from "./Agents";
 import { mockApi, renderPage } from "../test/harness";
-import { can, me, project } from "../test/fixtures";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-describe("Agents → runtime", () => {
-  it("creates a Claude Code CLI agent with the Anthropic provider and flags runtimes missing on the server", async () => {
-    const calls = mockApi({
-      "GET /api/projects/p-1/agents": () => [],
-      "GET /api/projects/p-1/teams": () => [],
-      "GET /api/agent-runtimes": () => [
-        { runtime: "Framework", name: "Microsoft Agent Framework", available: true, version: null, detail: "Built in" },
-        { runtime: "ClaudeCode", name: "Claude Code CLI", available: true, version: "2.1.312 (Claude Code)", detail: "claude" },
-        { runtime: "CursorCli", name: "Cursor CLI", available: false, version: null, detail: "'cursor-agent' is not installed on this node" },
-      ],
-      "POST /api/projects/p-1/agents": (c) => ({ id: "a-1", ...(c.body as object), skills: [], mcpServers: [], activeRuns: 0, spentThisMonthUsd: 0 }),
-    });
-    renderPage(<Agents project={project} me={me} can={can("agents.view", "agents.manage")} />);
-    await userEvent.click(await screen.findByRole("button", { name: "Yeni agent" }));
-    const drawer = screen.getByRole("dialog");
-    expect(await within(drawer).findByRole("option", { name: "Cursor CLI (kurulu değil)" })).toBeTruthy();
-    await userEvent.type(within(drawer).getByLabelText("Ad"), "Vedat (Claude Code)");
-    await userEvent.selectOptions(within(drawer).getByLabelText(/Çalışma ortamı/), "ClaudeCode");
-    expect(within(drawer).queryByLabelText(/Sağlayıcı/)).toBeNull();
-    expect(within(drawer).getByText(/2.1.312 \(Claude Code\)/)).toBeTruthy();
-    expect(within(drawer).queryByLabelText(/Temperature/)).toBeNull();
-    await userEvent.click(within(drawer).getByRole("button", { name: "Kaydet" }));
-    await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
-    expect(calls.find((c) => c.method === "POST")!.body).toMatchObject({ name: "Vedat (Claude Code)", runtime: "ClaudeCode", provider: "Anthropic", model: "claude-sonnet-4-5" });
+const providers = {
+  defaultRuntime: "ClaudeCode", defaultProvider: "Anthropic", defaultModel: "claude-sonnet-4-5",
+  providers: [
+    { key: "claude-code", name: "Claude Code CLI", kind: "cli", runtime: "ClaudeCode", provider: "Anthropic", defaultModel: "claude-sonnet-4-5", description: "Claude Code", configured: true, installed: true, version: "2.0" },
+    { key: "openai", name: "OpenAI", kind: "api", runtime: "Framework", provider: "OpenAI", defaultModel: "gpt-5", description: "GPT", configured: false, installed: null, version: null },
+  ],
+};
 
-    // Picking a runtime that is not installed explains what is missing.
-    await userEvent.click(await screen.findByRole("button", { name: "Yeni agent" }));
-    await userEvent.selectOptions(within(screen.getByRole("dialog")).getByLabelText(/Çalışma ortamı/), "CursorCli");
-    expect(within(screen.getByRole("dialog")).getByText(/is not installed on this node/)).toBeTruthy();
+describe("Agents", () => {
+  it("creates an agent with its own runtime, instructions and skills", async () => {
+    const calls = mockApi({
+      "GET /api/agents?mine=true": () => [],
+      "GET /api/settings/providers": () => providers,
+      "POST /api/agents": (c) => ({ id: "a-1", ...(c.body as object) }),
+    });
+    renderPage(<Agents />);
+    await userEvent.click(await screen.findByRole("button", { name: /Yeni agent/ }));
+    await userEvent.type(screen.getByLabelText("Ad"), "Backend dev");
+    await userEvent.click(screen.getByRole("button", { name: "Çalışma ortamı" }));
+    await userEvent.click(await screen.findByRole("button", { name: /OpenAI/ }));
+    expect(screen.getByText(/OpenAI henüz kullanılamıyor/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /Claude Code CLI/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Talimatlar" }));
+    await userEvent.type(screen.getByLabelText(/Talimatlar \(system prompt\)/), "Write tests.");
+    await userEvent.click(screen.getByRole("button", { name: /Skill'ler/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Skill ekle/ }));
+    const name = screen.getByLabelText("Skill adı");
+    await userEvent.clear(name);
+    await userEvent.type(name, "ef-migrations");
+    await userEvent.click(screen.getByRole("button", { name: "Oluştur" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/api/agents")).toBe(true));
+    const body = calls.find((c) => c.method === "POST")!.body as Record<string, unknown>;
+    expect(body).toMatchObject({ name: "Backend dev", kind: "Developer", runtime: "ClaudeCode", provider: "Anthropic", model: "claude-sonnet-4-5", instructions: "Write tests.", ownerUserId: "u-1" });
+    expect(body.skills).toEqual([expect.objectContaining({ name: "ef-migrations", enabled: true })]);
   });
 });

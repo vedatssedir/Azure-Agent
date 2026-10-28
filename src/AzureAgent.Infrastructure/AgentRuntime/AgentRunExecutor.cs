@@ -23,6 +23,8 @@ public sealed class AgentRuntimeOptions
 {
     public const string Section = "AgentRuntime";
     public string WorkspaceRoot { get; set; } = Path.Combine(Path.GetTempPath(), "azure-agent-workspaces");
+    /// <summary>Where the full git mirrors of every synced repository live (code browser, history).</summary>
+    public string MirrorRoot { get; set; } = Path.Combine(Path.GetTempPath(), "azure-agent-mirrors");
     public bool KeepWorkspaces { get; set; }
     /// <summary>Executable of the Claude Code CLI (npm package @anthropic-ai/claude-code).</summary>
     public string ClaudeCliPath { get; set; } = "claude";
@@ -50,7 +52,6 @@ public sealed partial class AgentRunExecutor(
     PriceList prices,
     IChatClientFactory chatClients,
     IProcessRunner processes,
-    McpToolLoader mcpTools,
     ICodingCliFactory cliFactory,
     IOptions<AgentRuntimeOptions> options,
     ILoggerFactory loggerFactory,
@@ -66,11 +67,11 @@ public sealed partial class AgentRunExecutor(
             logger.LogInformation("Run {RunId} is not queued (status {Status}); skipping", runId, run?.Status);
             return;
         }
-        var agent = await db.Agents.Include(a => a.Skills).Include(a => a.McpServers).FirstAsync(a => a.Id == run.AgentId, ct);
+        var agent = await db.Agents.FirstAsync(a => a.Id == run.AgentId, ct);
         using var scope = logger.BeginScope(new Dictionary<string, object> { ["RunId"] = run.Id, ["AgentId"] = agent.Id, ["ProjectId"] = run.ProjectId });
 
         if (!agent.Enabled) { await FailAsync(run, "Agent is disabled", ct); return; }
-        if (await budgets.ExhaustedAsync(agent, ct) is { } exhausted) { await FailAsync(run, exhausted, ct); return; }
+        if (await budgets.ExhaustedAsync(agent, run.ProjectId, ct) is { } exhausted) { await FailAsync(run, exhausted, ct); return; }
         var active = await db.AgentRuns.CountAsync(r => r.AgentId == agent.Id && r.Status == RunStatus.Running, ct);
         if (active >= agent.MaxConcurrentRuns)
         {
@@ -134,11 +135,11 @@ public sealed partial class AgentRunExecutor(
         {
             if (!repo.Policy.AgentsEnabled) throw new InvalidOperationException($"Agents are disabled for repository {repo.Name}");
             if (repo.DefaultBranch is null) throw new InvalidOperationException($"Repository {repo.Name} is empty");
-            if (!await PairedDeveloperMayWriteAsync(project, agent, repo, ct))
-                throw new InvalidOperationException($"{agent.PairedUniqueName} does not have '{Permission.RepositoryAgentWrite}' on {repo.Name}");
+            if (await OwnerWithoutWriteAsync(project, agent, repo, ct) is { } owner)
+                throw new InvalidOperationException($"{owner} does not have '{Permission.RepositoryAgentWrite}' on {repo.Name}");
         }
 
-        var credential = await connector.ServiceCredentialAsync(project.Id, ct);
+        var credential = await connector.ServiceCredentialAsync(project.OrganizationId, ct);
         var git = new GitWorkspace(processes, project.AzureOrganizationUrl, credential, agent.Name, $"agent-{agent.Id:N}@azure-agent.local", homeDir);
         var branch = WorkItemMapping.BranchName(item.AzureId, item.Title);
         run.Branch = branch;
@@ -154,7 +155,9 @@ public sealed partial class AgentRunExecutor(
 
         var allowed = repositories.SelectMany(r => r.Policy.AllowedCommands).ToHashSet(StringComparer.Ordinal);
         var prompt = ImplementationPrompt(item, repositories, branch);
-        var instructions = Instructions(agent, await SkillsAsync(agent, ct), repositories);
+        var instructions = Instructions(agent, repositories);
+        var settings = await db.Organizations.AsNoTracking().Where(o => o.Id == project.OrganizationId).Select(o => o.Settings).FirstAsync(ct);
+        if (settings.UpdateWorkItemState) await MoveWorkItemAsync(run, project, item, "InProgress", onlyFrom: "Proposed", ct);
         string summary;
         if (agent.Runtime == AgentRuntime.Framework)
         {
@@ -172,7 +175,7 @@ public sealed partial class AgentRunExecutor(
         }
         run.Summary = summary;
 
-        var (azureProject, azure) = await connector.ConnectAsync(project.Id, ct);
+        var (_, azure) = await connector.ConnectAsync(project.Id, ct);
         foreach (var repo in repositories)
         {
             var dir = Path.Combine(runDir, repo.Name);
@@ -203,30 +206,49 @@ public sealed partial class AgentRunExecutor(
 
         var links = string.Join(", ", run.PullRequestUrls.Select(u => $"<a href=\"{u}\">{u}</a>"));
         await azure.AddWorkItemCommentAsync(item.AzureId, $"Agent <b>{agent.Name}</b> opened {links}<br/>Cost: {run.CostUsd:0.0000} USD, {run.InputTokens + run.OutputTokens} tokens.", ct);
-        if (azureProject.Settings.ReviewState is { Length: > 0 } reviewState && reviewState != item.State)
+        if (settings.UpdateWorkItemState) await MoveWorkItemAsync(run, project, item, "Resolved", onlyFrom: null, ct);
+    }
+
+    /// <summary>
+    /// Moves the work item to the first state of a category (In Progress when the agent starts,
+    /// Resolved when its PR opens). Processes without such a state (Basic has no Resolved) are left alone.
+    /// </summary>
+    private async Task MoveWorkItemAsync(AgentRun run, Project project, WorkItem item, string category, string? onlyFrom, CancellationToken ct)
+    {
+        var current = project.WorkItemTypes.FirstOrDefault(t => t.Name == item.Type)?.States.FirstOrDefault(s => s.Name == item.State)?.Category;
+        if (onlyFrom is not null && current != onlyFrom) return;
+        if (project.StateInCategory(item.Type, category) is not { } state || state == item.State) return;
+        try
         {
-            // Process templates differ (Basic has To Do/Doing/Done); an unknown state must not fail a run whose PR is already open.
-            var states = (await azure.ListWorkItemTypesAsync(ct)).FirstOrDefault(t => t.Name == item.Type)?.States ?? [];
-            if (states.Contains(reviewState))
-                await azure.UpdateWorkItemFieldsAsync(item.AzureId, new Dictionary<string, object?> { ["System.State"] = reviewState }, ct);
-            else
-                await AddStepAsync(run, RunStepType.Log, "Review state skipped",
-                    $"'{reviewState}' is not a state of {item.Type} ({string.Join(", ", states)}); update the project's review state setting.", ct: ct);
+            var (_, azure) = await connector.ConnectAsync(project.Id, ct);
+            await azure.UpdateWorkItemFieldsAsync(item.AzureId, new Dictionary<string, object?> { ["System.State"] = state }, ct);
+            await AddStepAsync(run, RunStepType.Log, $"Work item moved to {state}", null, ct: ct);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            // Azure rules (required fields, transitions) can refuse the change; that must not fail the agent's work.
+            await AddStepAsync(run, RunStepType.Log, $"Could not move the work item to {state}", e.Message, ct: ct);
         }
     }
 
-    private async Task<bool> PairedDeveloperMayWriteAsync(Project project, Agent agent, Repository repo, CancellationToken ct)
+    /// <summary>
+    /// The agent works with its owner's rights: their project role and repository rules (organization
+    /// admins hold every permission). Returns the owner's e-mail when they may not let agents write here.
+    /// </summary>
+    private async Task<string?> OwnerWithoutWriteAsync(Project project, Agent agent, Repository repo, CancellationToken ct)
     {
-        // The agent acts for its paired developer: their project role and repository rules apply.
-        if (agent.PairedUniqueName is null) return true;
-        var member = await db.ProjectMembers.AsNoTracking().FirstOrDefaultAsync(m => m.ProjectId == project.Id && m.AzureUniqueName == agent.PairedUniqueName, ct);
-        if (member is null) return true;
+        if (agent.OwnerUserId is not { } ownerId) return null;
+        var email = await db.Users.AsNoTracking().Where(u => u.Id == ownerId).Select(u => u.Email).FirstAsync(ct);
+        if (await db.OrganizationMembers.AsNoTracking().AnyAsync(m => m.UserId == ownerId && m.OrganizationId == project.OrganizationId
+                && (m.Role == Domain.Identity.OrganizationRole.Admin || m.Role == Domain.Identity.OrganizationRole.Owner), ct)) return null;
+        var member = await db.ProjectMembers.AsNoTracking().FirstOrDefaultAsync(m => m.ProjectId == project.Id && m.UserId == ownerId, ct);
+        if (member is null) return email;
         var permissions = RolePermissions.For(member.Role).ToHashSet();
         var rules = await db.RepositoryAccessRules.AsNoTracking()
             .Where(r => r.RepositoryId == repo.Id && r.Permission == Permission.RepositoryAgentWrite && (r.UserId == member.UserId || r.Role == member.Role)).ToListAsync(ct);
         if (rules.Any(r => r.Effect == AccessEffect.Allow)) permissions.Add(Permission.RepositoryAgentWrite);
         if (rules.Any(r => r.Effect == AccessEffect.Deny)) permissions.Remove(Permission.RepositoryAgentWrite);
-        return permissions.Contains(Permission.RepositoryAgentWrite);
+        return permissions.Contains(Permission.RepositoryAgentWrite) ? null : email;
     }
 
     private static string ImplementationPrompt(WorkItem item, IReadOnlyList<Repository> repositories, string branch)
@@ -276,7 +298,7 @@ public sealed partial class AgentRunExecutor(
             Report real defects (bugs, security, missing tests for changed behaviour), not style preferences.
             """);
 
-        var reviewInstructions = Instructions(agent, await SkillsAsync(agent, ct), [repo]);
+        var reviewInstructions = Instructions(agent, [repo]);
         string text;
         if (agent.Runtime == AgentRuntime.Framework)
         {
@@ -350,10 +372,12 @@ public sealed partial class AgentRunExecutor(
         var price = await prices.FindAsync(run.OrganizationId, agent.Provider, agent.Model, ct);
         if (price is null) logger.LogWarning("No price configured for {Provider}/{Model}; cost will be recorded as 0", agent.Provider, agent.Model);
 
-        await using var mcp = await mcpTools.LoadAsync(project.Id, agent, ct);
-        var allTools = tools.Concat(mcp.Tools).ToList();
+        var allTools = tools.ToList();
+        var endpoint = agent.Settings.Endpoint ?? (agent.Provider == ModelProvider.AzureOpenAI
+            ? await db.Organizations.AsNoTracking().Where(o => o.Id == run.OrganizationId).Select(o => o.Settings.AzureOpenAiEndpoint).FirstAsync(ct)
+            : null);
 
-        var metered = new UsageMeteringChatClient(chatClients.Create(agent.Provider, agent.Model, apiKey, agent.Settings.Endpoint), async (usage, token) =>
+        var metered = new UsageMeteringChatClient(chatClients.Create(agent.Provider, agent.Model, apiKey, endpoint), async (usage, token) =>
         {
             var cost = price?.Cost(usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens) ?? 0;
             run.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens, cost);
@@ -364,7 +388,7 @@ public sealed partial class AgentRunExecutor(
                 throw new RunLimitExceededException($"Token limit exceeded ({run.InputTokens + run.OutputTokens} > {agent.Settings.MaxTokensPerRun})");
             if (run.CostUsd > agent.Settings.MaxCostPerRunUsd)
                 throw new RunLimitExceededException($"Cost limit exceeded ({run.CostUsd:0.0000} > {agent.Settings.MaxCostPerRunUsd} USD)");
-            if (await budgets.ExhaustedAsync(agent, token) is { } exhausted) throw new RunLimitExceededException(exhausted);
+            if (await budgets.ExhaustedAsync(agent, run.ProjectId, token) is { } exhausted) throw new RunLimitExceededException(exhausted);
         });
 
         var client = metered.AsBuilder()
@@ -407,8 +431,7 @@ public sealed partial class AgentRunExecutor(
         }
         var price = agent.Runtime == AgentRuntime.ClaudeCode ? await prices.FindAsync(run.OrganizationId, agent.Provider, agent.Model, ct) : null;
         var invocation = new CliInvocation(agent.Model, workDir, homeDir, instructions, Truncate(prompt, 100_000), allowedCommands, readOnly,
-            agent.Settings.MaxIterations, Math.Max(0.01m, agent.Settings.MaxCostPerRunUsd - run.CostUsd), credentials,
-            await mcpTools.DescribeAsync(project.Id, agent, ct));
+            agent.Settings.MaxIterations, Math.Max(0.01m, agent.Settings.MaxCostPerRunUsd - run.CostUsd), credentials);
         var (arguments, environment) = cli.Prepare(invocation);
         await AddStepAsync(run, RunStepType.Log, $"Started {cli.DisplayName}", $"{agent.Model} · {(readOnly ? "read-only" : "commands: " + string.Join(", ", allowedCommands.Order()))}", ct: ct);
 
@@ -479,7 +502,7 @@ public sealed partial class AgentRunExecutor(
             throw new RunLimitExceededException($"Token limit exceeded ({run.InputTokens + run.OutputTokens} > {agent.Settings.MaxTokensPerRun})");
         if (run.CostUsd > agent.Settings.MaxCostPerRunUsd)
             throw new RunLimitExceededException($"Cost limit exceeded ({run.CostUsd:0.0000} > {agent.Settings.MaxCostPerRunUsd} USD)");
-        if (await budgets.ExhaustedAsync(agent, ct) is { } exhausted) throw new RunLimitExceededException(exhausted);
+        if (await budgets.ExhaustedAsync(agent, run.ProjectId, ct) is { } exhausted) throw new RunLimitExceededException(exhausted);
     }
 
     /// <summary>Hash of a clone's git config and hooks; the platform runs git there after the agent, so these must not change.</summary>
@@ -496,7 +519,7 @@ public sealed partial class AgentRunExecutor(
         return Convert.ToHexString(sha.GetHashAndReset());
     }
 
-    private static string Instructions(Agent agent, IReadOnlyList<Skill> skills, IReadOnlyList<Repository> repositories)
+    private static string Instructions(Agent agent, IReadOnlyList<Repository> repositories)
     {
         var builder = new StringBuilder(agent.Instructions.Trim()).AppendLine().AppendLine();
         builder.AppendLine(agent.Kind == AgentKind.Developer
@@ -515,14 +538,8 @@ public sealed partial class AgentRunExecutor(
             : "You are a meticulous code reviewer. Base every finding on the code shown; cite file paths and line numbers.");
         foreach (var repo in repositories)
             builder.AppendLine($"Repository {repo.Name}: allowed commands {string.Join(", ", repo.Policy.AllowedCommands)}; at most {repo.Policy.MaxFilesChangedPerRun} changed files.");
-        foreach (var skill in skills) builder.AppendLine().AppendLine($"## Skill: {skill.Name}").AppendLine(skill.Content.Trim());
+        foreach (var skill in agent.Skills.Where(s => s.Enabled)) builder.AppendLine().AppendLine($"## Skill: {skill.Name}").AppendLine(skill.Content.Trim());
         return builder.ToString();
-    }
-
-    private async Task<IReadOnlyList<Skill>> SkillsAsync(Agent agent, CancellationToken ct)
-    {
-        var ids = agent.Skills.Select(s => s.SkillId).ToList();
-        return await db.Skills.AsNoTracking().Where(s => ids.Contains(s.Id)).OrderBy(s => s.Key).ToListAsync(ct);
     }
 
     private async Task AddStepAsync(AgentRun run, RunStepType type, string title, string? detail, long input = 0, long output = 0, decimal cost = 0,

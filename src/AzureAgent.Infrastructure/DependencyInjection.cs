@@ -78,6 +78,9 @@ public static class DependencyInjection
         services.AddSingleton<IChatClientFactory, ChatClientFactory>();
         services.AddSingleton<IProcessRunner, ProcessRunner>();
         services.AddSingleton<ICodingCliFactory, CodingCliFactory>();
+        services.AddSingleton<IRepositoryMirror, Git.GitMirror>();
+        services.AddHttpClient(AiProviderProbe.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(20));
+        services.AddSingleton<IAiProviderProbe, AiProviderProbe>();
         services.AddSingleton<IAgentRuntimeCatalog, AgentRuntimeCatalog>();
 
         // Application services used by Wolverine handlers.
@@ -89,9 +92,9 @@ public static class DependencyInjection
         services.AddScoped<MembershipProvisioner>();
         services.AddScoped<Dispatcher>();
         services.AddScoped<ProjectSynchronizer>();
+        services.AddScoped<OrganizationSynchronizer>();
         services.AddScoped<BudgetGuard>();
         services.AddScoped<PriceList>();
-        services.AddScoped<McpToolLoader>();
         services.AddScoped<AgentRunExecutor>();
         services.AddScoped<Jobs.ScheduledJobs>();
         services.AddScoped<DatabaseInitializer>();

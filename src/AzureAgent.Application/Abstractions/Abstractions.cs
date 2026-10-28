@@ -27,8 +27,6 @@ public interface IAppDbContext
     DbSet<Commit> Commits { get; }
     DbSet<PullRequest> PullRequests { get; }
     DbSet<Agent> Agents { get; }
-    DbSet<Skill> Skills { get; }
-    DbSet<McpServer> McpServers { get; }
     DbSet<AgentRun> AgentRuns { get; }
     DbSet<AgentRunStep> AgentRunSteps { get; }
     DbSet<CodeReview> CodeReviews { get; }
@@ -145,4 +143,45 @@ public sealed record AgentRuntimeInfo(Domain.Agents.AgentRuntime Runtime, string
 public interface IAgentRuntimeCatalog
 {
     Task<IReadOnlyList<AgentRuntimeInfo>> ListAsync(CancellationToken ct);
+}
+
+// Local git mirrors (code browser, history) ---------------------------------------------------------
+
+public sealed record GitBranch(string Name, string CommitId, DateTimeOffset CommittedAt, string Subject);
+
+public sealed record GitTreeEntry(string Name, string Path, bool IsDirectory, long Size);
+
+public sealed record GitBlob(string Path, long Size, bool IsBinary, bool IsTruncated, string? Content);
+
+public sealed record GitCommitInfo(string CommitId, string AuthorName, string AuthorEmail, DateTimeOffset AuthoredAt, string Subject, string Message,
+    IReadOnlyList<string> ParentIds);
+
+public sealed record GitFileChange(string Path, string? OldPath, string Status, int Additions, int Deletions, string Patch, bool IsBinary);
+
+public sealed record GitCommitDetail(GitCommitInfo Commit, IReadOnlyList<GitFileChange> Files, bool IsTruncated);
+
+/// <summary>
+/// A full local mirror (all refs, all history) of every synced repository. The code browser,
+/// history and diffs read from it; sync keeps it current.
+/// </summary>
+public interface IRepositoryMirror
+{
+    /// <summary>Clones the mirror on first use, then fetches with prune.</summary>
+    Task SyncAsync(Guid organizationId, Guid repositoryId, string remoteUrl, string organizationUrl, AzureCredential credential, CancellationToken ct);
+    bool Exists(Guid organizationId, Guid repositoryId);
+    Task<IReadOnlyList<GitBranch>> BranchesAsync(Guid organizationId, Guid repositoryId, CancellationToken ct);
+    Task<IReadOnlyList<GitTreeEntry>> TreeAsync(Guid organizationId, Guid repositoryId, string reference, string path, CancellationToken ct);
+    Task<GitBlob?> BlobAsync(Guid organizationId, Guid repositoryId, string reference, string path, CancellationToken ct);
+    Task<IReadOnlyList<GitCommitInfo>> LogAsync(Guid organizationId, Guid repositoryId, string reference, string? path, int skip, int take, CancellationToken ct);
+    Task<GitCommitDetail?> CommitAsync(Guid organizationId, Guid repositoryId, string commitId, CancellationToken ct);
+    /// <summary>Changes of <paramref name="source"/> since it diverged from <paramref name="target"/> (pull request diff).</summary>
+    Task<IReadOnlyList<GitFileChange>> CompareAsync(Guid organizationId, Guid repositoryId, string target, string source, CancellationToken ct);
+    /// <summary>Commits on any branch since the given time (links work items through AB#123).</summary>
+    Task<IReadOnlyList<GitCommitInfo>> CommitsSinceAsync(Guid organizationId, Guid repositoryId, DateTimeOffset since, CancellationToken ct);
+}
+
+/// <summary>Checks an AI provider credential with a cheap call (model list, or a one-turn CLI prompt).</summary>
+public interface IAiProviderProbe
+{
+    Task<(bool Ok, string Detail)> ProbeAsync(string provider, IReadOnlyDictionary<string, string> credentials, string? endpoint, CancellationToken ct);
 }

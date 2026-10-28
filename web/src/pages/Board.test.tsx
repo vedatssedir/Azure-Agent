@@ -1,64 +1,49 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { Board } from "./Board";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { BoardPage } from "./Board";
 import { mockApi, renderPage } from "../test/harness";
-import { can, me, project } from "../test/fixtures";
+import { PROJECT_ID, workItem } from "../test/fixtures";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-const item = (azureId: number, title: string, state = "To Do") => ({
-  azureId, type: "Issue", title, state, assignedToUniqueName: null, assignedToDisplayName: null, priority: 2, storyPoints: null, repositoryNames: [],
-  iterationPath: null, webUrl: "", changedAt: "", lastRunStatus: null, agentName: null, costUsd: 0,
+const TEAM = "22222222-2222-2222-2222-222222222222";
+const board = (todo = [workItem()], doing = [] as ReturnType<typeof workItem>[]) => ({
+  teamId: TEAM, teamName: "Test Team", board: "Issues", boards: ["Issues", "Epics"],
+  columns: [
+    { name: "To Do", columnType: "incoming", itemLimit: 0, stateMappings: { Issue: "To Do" }, items: todo },
+    { name: "Doing", columnType: "inProgress", itemLimit: 1, stateMappings: { Issue: "Doing" }, items: doing },
+    { name: "Done", columnType: "outgoing", itemLimit: 0, stateMappings: { Issue: "Done" }, items: [] },
+  ],
 });
 
 describe("Board", () => {
-  it("filters by team and unassigned through the API", async () => {
+  it("shows Azure's columns with WIP limits and moves a dropped card to that column in Azure", async () => {
+    let moved = false;
     const calls = mockApi({
-      "GET /api/projects/p-1/teams": () => [{ id: "t-1", name: "Backend", members: [], areaPaths: ["Test_Project"] }],
-      "GET /api/projects/p-1/work-items": () => [item(1, "Everything")],
-      "GET /api/projects/p-1/work-items?team=t-1": () => [item(2, "Team item")],
-      "GET /api/projects/p-1/work-items?unassigned=true": () => [item(3, "Nobody's item")],
+      [`GET /api/projects/${PROJECT_ID}/teams`]: () => [{ id: TEAM, name: "Test Team", members: [], areaPaths: [], boards: ["Issues"], iterations: [] }],
+      [`GET /api/projects/${PROJECT_ID}/board`]: () => (moved ? board([], [workItem({ state: "Doing", boardColumn: "Doing" })]) : board()),
+      [`POST /api/projects/${PROJECT_ID}/work-items/1/move`]: () => { moved = true; return { status: 204 }; },
     });
-    renderPage(<Board project={project} me={me} can={can("workitems.view")} />);
-    expect(await screen.findByText("Everything")).toBeTruthy();
-    const view = screen.getByLabelText("Görünüm");
-    await screen.findByRole("option", { name: "Takım: Backend" });
-    await userEvent.selectOptions(view, "team:t-1");
-    expect(await screen.findByText("Team item")).toBeTruthy();
-    await userEvent.selectOptions(view, "unassigned");
-    expect(await screen.findByText("Nobody's item")).toBeTruthy();
-    expect(calls.map((c) => c.path)).toContain("/api/projects/p-1/work-items?team=t-1");
-    // Creating needs its own permission.
-    expect(screen.queryByRole("button", { name: "Yeni madde" })).toBeNull();
+    renderPage(<BoardPage />, { path: `/p/${PROJECT_ID}/board`, route: "/p/:projectId/board" });
+    const card = await screen.findByRole("button", { name: /Issue 1: Login sayfası/ });
+    const doing = screen.getByRole("region", { name: "Doing" });
+    expect(within(doing).getByText("0/1")).toBeTruthy();
+    fireEvent.dragStart(card);
+    fireEvent.dragOver(doing);
+    fireEvent.drop(doing);
+    await waitFor(() => expect(calls.some((c) => c.path.endsWith("/work-items/1/move"))).toBe(true));
+    expect(calls.find((c) => c.path.endsWith("/move"))!.body).toEqual({ teamId: TEAM, board: "Issues", column: "Doing" });
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Doing" })).getByText("Login sayfası")).toBeTruthy());
   });
 
-  it("creates a work item in Azure with the selected repositories and opens it", async () => {
-    const created = { ...item(42, "Add PaginatedList tests"), repositoryNames: ["EFCore.GenericRepository"] };
+  it("filters to my items through the server", async () => {
     const calls = mockApi({
-      "GET /api/projects/p-1/teams": () => [],
-      "GET /api/projects/p-1/work-items": () => [],
-      "GET /api/projects/p-1/work-item-types": () => [{ name: "Issue", states: ["To Do", "Doing", "Done"], fields: [] }, { name: "Task", states: [], fields: [] }],
-      "GET /api/projects/p-1/repositories": () => [
-        { id: "r-1", name: "EFCore.GenericRepository", defaultBranch: "master", webUrl: "", policy: {}, openPullRequests: 0, lastCommitAt: null },
-        { id: "r-2", name: "Empty", defaultBranch: null, webUrl: "", policy: {}, openPullRequests: 0, lastCommitAt: null },
-      ],
-      "POST /api/projects/p-1/work-items": () => created,
-      "GET /api/projects/p-1/work-items/42": () => ({ summary: created, description: "", acceptanceCriteria: "", areaPath: null, tags: [], runs: [], pullRequests: [], commits: [] }),
+      [`GET /api/projects/${PROJECT_ID}/teams`]: () => [],
+      [`GET /api/projects/${PROJECT_ID}/board`]: () => board(),
     });
-    renderPage(<Board project={project} me={me} can={can("workitems.view", "workitems.create")} />);
-    await userEvent.click(await screen.findByRole("button", { name: "Yeni madde" }));
-    const drawer = screen.getByRole("dialog");
-    await within(drawer).findByRole("option", { name: "Issue" });
-    await userEvent.type(within(drawer).getByLabelText("Başlık"), "Add PaginatedList tests");
-    await userEvent.type(within(drawer).getByLabelText(/Açıklama/), "Cover first/last page");
-    expect((within(drawer).getByLabelText(/Empty/) as HTMLInputElement).disabled).toBe(true);
-    await userEvent.click(within(drawer).getByLabelText(/EFCore.GenericRepository/));
-    await userEvent.click(within(drawer).getByRole("button", { name: "Azure'da oluştur" }));
-    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("Issue #42"));
-    expect(calls.find((c) => c.method === "POST")!.body).toEqual({
-      type: "Issue", title: "Add PaginatedList tests", description: "Cover first/last page", acceptanceCriteria: "",
-      repositoryNames: ["EFCore.GenericRepository"], assignToMe: true, priority: 2, tags: [],
-    });
+    renderPage(<BoardPage />, { path: `/p/${PROJECT_ID}/board`, route: "/p/:projectId/board" });
+    await screen.findByText("Login sayfası");
+    fireEvent.click(screen.getByLabelText(/Sadece bana atananlar/));
+    await waitFor(() => expect(calls.some((c) => c.path === `/api/projects/${PROJECT_ID}/board?mine=true`)).toBe(true));
   });
 });

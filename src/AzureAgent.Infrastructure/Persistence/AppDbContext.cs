@@ -30,8 +30,6 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
     public DbSet<Commit> Commits => Set<Commit>();
     public DbSet<PullRequest> PullRequests => Set<PullRequest>();
     public DbSet<Agent> Agents => Set<Agent>();
-    public DbSet<Skill> Skills => Set<Skill>();
-    public DbSet<McpServer> McpServers => Set<McpServer>();
     public DbSet<AgentRun> AgentRuns => Set<AgentRun>();
     public DbSet<AgentRunStep> AgentRunSteps => Set<AgentRunStep>();
     public DbSet<CodeReview> CodeReviews => Set<CodeReview>();
@@ -85,6 +83,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
         {
             e.HasIndex(x => x.Slug).IsUnique();
             e.Property(x => x.MonthlyBudgetUsd).HasPrecision(12, 2);
+            e.OwnsOne(x => x.Settings, s =>
+            {
+                s.ToJson();
+                s.OwnsMany(x => x.TeamRoles);
+                s.OwnsMany(x => x.GroupRoles);
+            });
         });
         b.Entity<OrganizationMember>(e =>
         {
@@ -95,11 +99,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
         b.Entity<Project>(e =>
         {
             e.HasIndex(x => new { x.OrganizationId, x.Key }).IsUnique();
-            e.OwnsOne(x => x.Settings, s =>
+            e.HasIndex(x => new { x.OrganizationId, x.AzureId }).IsUnique();
+            e.OwnsMany(x => x.WorkItemTypes, t =>
             {
-                s.ToJson();
-                s.OwnsMany(x => x.TeamRoles);
-                s.OwnsMany(x => x.GroupRoles);
+                t.ToJson();
+                t.OwnsMany(x => x.States);
             });
             e.Property(x => x.MonthlyBudgetUsd).HasPrecision(12, 2);
             e.HasOne<Organization>().WithMany().HasForeignKey(x => x.OrganizationId).OnDelete(DeleteBehavior.Cascade);
@@ -122,6 +126,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
             e.HasIndex(x => new { x.ProjectId, x.AzureId }).IsUnique();
             e.OwnsMany(x => x.Members, m => m.ToJson());
             e.OwnsMany(x => x.Areas, a => a.ToJson());
+            e.OwnsMany(x => x.Boards, board =>
+            {
+                board.ToJson();
+                board.OwnsMany(x => x.Columns, c => c.OwnsMany(x => x.StateMappings));
+            });
+            e.OwnsMany(x => x.Iterations, i => i.ToJson());
             e.HasOne<Project>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Cascade);
         });
         b.Entity<Repository>(e =>
@@ -160,29 +170,18 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
 
         b.Entity<Agent>(e =>
         {
-            e.HasIndex(x => new { x.ProjectId, x.PairedUniqueName }).IsUnique().HasFilter("\"PairedUniqueName\" IS NOT NULL");
+            e.HasIndex(x => new { x.OrganizationId, x.Slug }).IsUnique();
+            e.HasIndex(x => x.OwnerUserId);
             e.Property(x => x.MonthlyBudgetUsd).HasPrecision(12, 2);
             e.OwnsOne(x => x.Settings, s =>
             {
                 s.ToJson();
                 s.Property(x => x.MaxCostPerRunUsd).HasPrecision(12, 4);
             });
-            e.HasMany(x => x.Skills).WithOne().HasForeignKey(x => x.AgentId).OnDelete(DeleteBehavior.Cascade);
-            e.HasMany(x => x.McpServers).WithOne().HasForeignKey(x => x.AgentId).OnDelete(DeleteBehavior.Cascade);
-            e.HasOne<Project>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.Cascade);
+            e.OwnsMany(x => x.Skills, s => s.ToJson());
+            e.HasOne<User>().WithMany().HasForeignKey(x => x.OwnerUserId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<Project>().WithMany().HasForeignKey(x => x.ProjectId).OnDelete(DeleteBehavior.SetNull);
         });
-        b.Entity<AgentSkill>(e =>
-        {
-            e.HasKey(x => new { x.AgentId, x.SkillId });
-            e.HasOne<Skill>().WithMany().HasForeignKey(x => x.SkillId).OnDelete(DeleteBehavior.Cascade);
-        });
-        b.Entity<AgentMcpServer>(e =>
-        {
-            e.HasKey(x => new { x.AgentId, x.McpServerId });
-            e.HasOne<McpServer>().WithMany().HasForeignKey(x => x.McpServerId).OnDelete(DeleteBehavior.Cascade);
-        });
-        b.Entity<Skill>(e => e.HasIndex(x => new { x.OrganizationId, x.Key }).IsUnique());
-        b.Entity<McpServer>(e => e.HasIndex(x => new { x.OrganizationId, x.Name }).IsUnique());
 
         b.Entity<AgentRun>(e =>
         {

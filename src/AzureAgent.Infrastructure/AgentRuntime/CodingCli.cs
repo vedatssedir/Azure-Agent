@@ -7,10 +7,6 @@ namespace AzureAgent.Infrastructure.AgentRuntime;
 // The enum shares its name with this namespace.
 using AgentRuntime = AzureAgent.Domain.Agents.AgentRuntime;
 
-/// <summary>An MCP server handed to a CLI agent through its config file (secrets resolved).</summary>
-public sealed record CliMcpServer(string Name, McpTransport Transport, string? Command, IReadOnlyList<string> Arguments, string? Url,
-    IReadOnlyDictionary<string, string> Secrets);
-
 /// <summary>Everything one CLI agent run needs. The CLI never receives Azure credentials: git stays with the platform.</summary>
 public sealed record CliInvocation(
     string Model,
@@ -22,8 +18,7 @@ public sealed record CliInvocation(
     bool ReadOnly,
     int MaxTurns,
     decimal MaxBudgetUsd,
-    IReadOnlyDictionary<string, string> Credentials,
-    IReadOnlyList<CliMcpServer> McpServers);
+    IReadOnlyDictionary<string, string> Credentials);
 
 public abstract record CliEvent;
 
@@ -82,29 +77,6 @@ internal static class CliJson
         return text.Length > max ? text[..max] + "…" : text;
     }
 
-    /// <summary>The shared mcpServers document both CLIs read (Claude: --mcp-config, Cursor: .cursor/mcp.json).</summary>
-    public static JsonObject McpDocument(IReadOnlyList<CliMcpServer> servers)
-    {
-        var map = new JsonObject();
-        foreach (var server in servers)
-        {
-            map[server.Name] = server.Transport == McpTransport.Stdio
-                ? new JsonObject
-                {
-                    ["command"] = server.Command,
-                    ["args"] = new JsonArray(server.Arguments.Select(a => (JsonNode?)JsonValue.Create(a)).ToArray()),
-                    ["env"] = new JsonObject(server.Secrets.Select(s => KeyValuePair.Create(s.Key, (JsonNode?)JsonValue.Create(s.Value)))),
-                }
-                : new JsonObject
-                {
-                    ["type"] = "http",
-                    ["url"] = server.Url,
-                    ["headers"] = new JsonObject(server.Secrets.Select(s => KeyValuePair.Create(s.Key, (JsonNode?)JsonValue.Create(s.Value)))),
-                };
-        }
-        return new JsonObject { ["mcpServers"] = map };
-    }
-
     public static string WriteFile(string directory, string name, string content)
     {
         Directory.CreateDirectory(directory);
@@ -118,8 +90,8 @@ internal static class CliJson
 /// <summary>
 /// Claude Code (<c>claude -p</c>). Permission mode <c>dontAsk</c> denies every tool that is not
 /// pre-approved, so the repository's allowed commands become <c>Bash(cmd:*)</c> rules and nothing else
-/// runs. <c>--bare</c> skips hooks and plugins a repository could bring; settings and sessions live in
-/// the run's private HOME.
+/// runs. <c>--bare</c> skips hooks and plugins a repository could bring, <c>--strict-mcp-config</c> keeps
+/// out MCP servers a repository could declare; settings and sessions live in the run's private HOME.
 /// </summary>
 public sealed class ClaudeCodeAdapter(string executable) : ICodingCliAdapter
 {
@@ -139,7 +111,6 @@ public sealed class ClaudeCodeAdapter(string executable) : ICodingCliAdapter
             allowed.AddRange(WriteTools);
             allowed.AddRange(invocation.AllowedCommands.Where(c => c != "git").Select(c => $"Bash({c}:*)"));
         }
-        allowed.AddRange(invocation.McpServers.Select(s => $"mcp__{s.Name}"));
         var instructions = CliJson.WriteFile(invocation.HomeDirectory, "instructions.md", invocation.Instructions);
         var arguments = new List<string>
         {
@@ -152,8 +123,6 @@ public sealed class ClaudeCodeAdapter(string executable) : ICodingCliAdapter
             "--max-budget-usd", invocation.MaxBudgetUsd.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "--append-system-prompt-file", instructions,
         };
-        if (invocation.McpServers.Count > 0)
-            arguments.AddRange(["--mcp-config", CliJson.WriteFile(invocation.HomeDirectory, "mcp.json", CliJson.McpDocument(invocation.McpServers).ToJsonString(CliJson.Options))]);
         arguments.AddRange(["--disallowedTools", "Bash(git:*)", "WebFetch", "WebSearch"]);
         arguments.Add("--allowedTools");
         arguments.AddRange(allowed);
@@ -235,8 +204,6 @@ public sealed class CursorCliAdapter(string executable) : ICodingCliAdapter
             JsonValue.Create("Write(.cursor/**)"), JsonValue.Create("Write(**/.git/**)")]);
         var config = Path.Combine(invocation.WorkingDirectory, ".cursor");
         CliJson.WriteFile(config, "cli.json", new JsonObject { ["permissions"] = new JsonObject { ["allow"] = allow, ["deny"] = deny } }.ToJsonString(CliJson.Options));
-        if (invocation.McpServers.Count > 0)
-            CliJson.WriteFile(config, "mcp.json", CliJson.McpDocument(invocation.McpServers).ToJsonString(CliJson.Options));
 
         // No system prompt flag: the instructions lead the prompt.
         var prompt = $"{invocation.Instructions.Trim()}\n\n---\n\n{invocation.Prompt}";

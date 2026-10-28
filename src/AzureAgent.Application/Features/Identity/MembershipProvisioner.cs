@@ -1,4 +1,6 @@
 using AzureAgent.Application.Abstractions;
+using AzureAgent.Application.Common;
+using AzureAgent.Domain.Agents;
 using AzureAgent.Domain.Azure;
 using AzureAgent.Domain.Identity;
 using AzureAgent.Domain.Projects;
@@ -17,7 +19,7 @@ public sealed record ProvisioningResult(int Added, int Updated, int Removed, int
 public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenant, InvitationService invitations, ILogger<MembershipProvisioner> logger)
 {
     /// <summary>Azure uniqueName → project role, from the team mappings (highest role wins).</summary>
-    public static Dictionary<string, ProjectRole> DesiredRoles(ProjectSettings settings, IEnumerable<Team> teams)
+    public static Dictionary<string, ProjectRole> DesiredRoles(OrganizationSettings settings, IEnumerable<Team> teams)
     {
         var result = new Dictionary<string, ProjectRole>(StringComparer.OrdinalIgnoreCase);
         foreach (var team in teams)
@@ -35,16 +37,17 @@ public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenan
         return result;
     }
 
-    public static ProjectRole? GroupRole(ProjectSettings settings, IReadOnlyCollection<string> groups) =>
+    public static ProjectRole? GroupRole(OrganizationSettings settings, IReadOnlyCollection<string> groups) =>
         settings.GroupRoles.Where(g => groups.Contains(g.GroupId, StringComparer.OrdinalIgnoreCase))
             .Select(g => (ProjectRole?)g.Role).DefaultIfEmpty(null).Max();
 
     /// <summary>Reconciles one project's memberships with its synced Azure teams. Runs in the project's tenant.</summary>
     public async Task<ProvisioningResult> SyncProjectAsync(Project project, string actor, CancellationToken ct)
     {
-        if (!project.Settings.AutoProvisionMembers) return new ProvisioningResult(0, 0, 0, 0);
+        var settings = await db.Organizations.AsNoTracking().Where(o => o.Id == project.OrganizationId).Select(o => o.Settings).FirstAsync(ct);
+        if (!settings.AutoProvisionMembers) return new ProvisioningResult(0, 0, 0, 0);
         var teams = await db.Teams.Where(t => t.ProjectId == project.Id).ToListAsync(ct);
-        var desired = DesiredRoles(project.Settings, teams);
+        var desired = DesiredRoles(settings, teams);
         var names = desired.Keys.ToList();
         var users = await db.Users.Where(u => u.IsActive && names.Contains(u.Email)).ToListAsync(ct);
         var members = await db.ProjectMembers.Where(m => m.ProjectId == project.Id).ToListAsync(ct);
@@ -84,7 +87,7 @@ public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenan
             removed++;
         }
 
-        if (project.Settings.AutoInviteTeamMembers)
+        if (settings.AutoInviteTeamMembers)
         {
             var known = users.Select(u => u.Email).ToHashSet();
             var displayNames = teams.SelectMany(t => t.Members).GroupBy(m => m.UniqueName.ToLowerInvariant()).ToDictionary(g => g.Key, g => g.First().DisplayName);
@@ -94,6 +97,7 @@ public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenan
                         project.Id, actor, sendEmail: true, ct) is not null) invited++;
             }
         }
+        await EnsureDefaultAgentsAsync(project.OrganizationId, settings, users.Where(u => desired[u.Email] >= ProjectRole.Developer).ToList(), ct);
         if (added + updated + removed + invited > 0)
         {
             db.AuditEntries.Add(new Domain.Auditing.AuditEntry
@@ -115,14 +119,17 @@ public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenan
     public async Task<bool> ProvisionUserAsync(User user, IReadOnlyCollection<string> groups, CancellationToken ct)
     {
         tenant.UseAllOrganizations();
-        var projects = await db.Projects.ToListAsync(ct);
+        var projects = await db.Projects.Where(p => !p.IsRemoved).ToListAsync(ct);
+        var settingsByOrg = await db.Organizations.ToDictionaryAsync(o => o.Id, o => o.Settings, ct);
+        var developerIn = new HashSet<Guid>();
         var teams = (await db.Teams.ToListAsync(ct)).ToLookup(t => t.ProjectId);
         var members = await db.ProjectMembers.Where(m => m.UserId == user.Id).ToListAsync(ct);
         var orgMembers = (await db.OrganizationMembers.Where(m => m.UserId == user.Id).Select(m => m.OrganizationId).ToListAsync(ct)).ToHashSet();
         foreach (var project in projects)
         {
-            var teamRole = project.Settings.AutoProvisionMembers && DesiredRoles(project.Settings, teams[project.Id]).TryGetValue(user.Email, out var r) ? r : (ProjectRole?)null;
-            var groupRole = GroupRole(project.Settings, groups);
+            var settings = settingsByOrg[project.OrganizationId];
+            var teamRole = settings.AutoProvisionMembers && DesiredRoles(settings, teams[project.Id]).TryGetValue(user.Email, out var r) ? r : (ProjectRole?)null;
+            var groupRole = GroupRole(settings, groups);
             var existing = members.FirstOrDefault(m => m.ProjectId == project.Id);
             if (teamRole is null && groupRole is null)
             {
@@ -131,6 +138,7 @@ public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenan
                 continue;
             }
             var role = (ProjectRole)Math.Max((int)(teamRole ?? ProjectRole.Viewer), (int)(groupRole ?? ProjectRole.Viewer));
+            if (role >= ProjectRole.Developer) developerIn.Add(project.OrganizationId);
             var source = teamRole >= (groupRole ?? ProjectRole.Viewer) ? MembershipSource.AzureTeam : MembershipSource.EntraGroup;
             if (orgMembers.Add(project.OrganizationId))
                 db.OrganizationMembers.Add(new OrganizationMember { OrganizationId = project.OrganizationId, UserId = user.Id, Role = OrganizationRole.Member });
@@ -153,6 +161,40 @@ public sealed class MembershipProvisioner(IAppDbContext db, ITenantContext tenan
             }
         }
         await db.SaveChangesAsync(ct);
+        foreach (var organizationId in developerIn) await EnsureDefaultAgentsAsync(organizationId, settingsByOrg[organizationId], [user], ct);
         return orgMembers.Count > 0;
+    }
+
+    /// <summary>Gives developers without any agent a default one built from the organization's AI defaults.</summary>
+    private async Task EnsureDefaultAgentsAsync(Guid organizationId, OrganizationSettings settings, IReadOnlyCollection<User> developers, CancellationToken ct)
+    {
+        if (!settings.CreateDefaultAgentForDevelopers || developers.Count == 0) return;
+        var ids = developers.Select(u => u.Id).ToList();
+        var owners = (await db.Agents.Where(a => a.OrganizationId == organizationId && a.OwnerUserId != null && ids.Contains(a.OwnerUserId.Value))
+            .Select(a => a.OwnerUserId!.Value).ToListAsync(ct)).ToHashSet();
+        var slugs = (await db.Agents.Where(a => a.OrganizationId == organizationId).Select(a => a.Slug).ToListAsync(ct)).ToHashSet();
+        foreach (var user in developers.Where(u => !owners.Contains(u.Id)))
+        {
+            var name = $"{user.DisplayName.Split(' ')[0]}'s agent";
+            db.Agents.Add(new Agent
+            {
+                OrganizationId = organizationId, OwnerUserId = user.Id, Name = name, Slug = AgentSlugs.Unique(name, slugs), Title = "Developer agent",
+                Kind = AgentKind.Developer, Runtime = settings.DefaultRuntime, Provider = settings.DefaultProvider, Model = settings.DefaultModel, IsDefault = true,
+            });
+            logger.LogInformation("Created default agent for {Email}", user.Email);
+        }
+        await db.SaveChangesAsync(ct);
+    }
+}
+
+public static class AgentSlugs
+{
+    public static string Unique(string name, ISet<string> taken)
+    {
+        var slug = Slugs.From(name, 40);
+        var candidate = slug;
+        for (var i = 2; taken.Contains(candidate); i++) candidate = $"{slug}-{i}";
+        taken.Add(candidate);
+        return candidate;
     }
 }

@@ -3,46 +3,93 @@ using AzureAgent.Domain.Identity;
 
 namespace AzureAgent.Domain.Projects;
 
-/// <summary>One Azure DevOps project managed by the platform.</summary>
+/// <summary>
+/// One Azure DevOps project, mirrored from the organization the platform is connected to. Projects
+/// are never created by hand: organization sync adds, updates and retires them.
+/// </summary>
 public sealed class Project : Entity, IOrganizationScoped
 {
     public Guid OrganizationId { get; init; }
+    /// <summary>Azure DevOps project id.</summary>
+    public required string AzureId { get; init; }
     public required string Name { get; set; }
-    /// <summary>Short uppercase key, unique in the organization (e.g. SHOP).</summary>
+    /// <summary>Short uppercase key, unique in the organization (derived from the name).</summary>
     public required string Key { get; init; }
     public string? Description { get; set; }
     public required string AzureOrganizationUrl { get; set; }
     public required string AzureProjectName { get; set; }
-    public ProjectSettings Settings { get; set; } = new();
+    /// <summary>Work item types of the project's process, with their states (colors, categories) and fields.</summary>
+    public List<WorkItemTypeInfo> WorkItemTypes { get; set; } = [];
     public decimal? MonthlyBudgetUsd { get; set; }
+    /// <summary>The project no longer exists in Azure DevOps (kept for history).</summary>
+    public bool IsRemoved { get; set; }
     public DateTimeOffset? LastSyncedAt { get; set; }
     public string? LastSyncError { get; set; }
+
+    /// <summary>A state is closed when its category is Completed or Removed (process independent).</summary>
+    public bool IsClosedState(string type, string state) =>
+        WorkItemTypes.FirstOrDefault(t => t.Name == type)?.States.FirstOrDefault(s => s.Name == state)?.Category is "Completed" or "Removed"
+        || (WorkItemTypes.Count == 0 && state is "Closed" or "Done" or "Removed" or "Completed");
+
+    /// <summary>First state of the type in the given category (Proposed, InProgress, Resolved, Completed, Removed).</summary>
+    public string? StateInCategory(string type, string category) =>
+        WorkItemTypes.FirstOrDefault(t => t.Name == type)?.States.FirstOrDefault(s => s.Category == category)?.Name;
 }
 
-/// <summary>Per-project behaviour; editable by holders of <see cref="Permission.SettingsManage"/>.</summary>
-public sealed class ProjectSettings
+public sealed class WorkItemTypeInfo
 {
-    /// <summary>Queue an agent run when a work item is assigned to a developer paired with an agent.</summary>
+    public required string Name { get; set; }
+    public string Color { get; set; } = "";
+    public bool IsDisabled { get; set; }
+    public List<WorkItemStateInfo> States { get; set; } = [];
+    public List<string> Fields { get; set; } = [];
+}
+
+public sealed class WorkItemStateInfo
+{
+    public required string Name { get; set; }
+    public string Color { get; set; } = "";
+    /// <summary>Proposed, InProgress, Resolved, Completed or Removed.</summary>
+    public string Category { get; set; } = "";
+}
+
+/// <summary>
+/// Organization-wide behaviour, edited in one place (Settings). There are no per-project settings:
+/// every synced project follows these.
+/// </summary>
+public sealed class OrganizationSettings
+{
+    /// <summary>Start the developer's default agent when a work item is assigned to them (items tagged agent:&lt;name&gt; always start).</summary>
     public bool AutoDispatch { get; set; } = true;
-    /// <summary>Require a human to approve a queued run before it starts.</summary>
+    /// <summary>Require a human to approve a run before it starts.</summary>
     public bool RequireRunApproval { get; set; }
-    /// <summary>Work item state written when the agent opens a pull request (null = leave unchanged).</summary>
-    public string? ReviewState { get; set; } = "Resolved";
-    /// <summary>States in which work items are never dispatched.</summary>
-    public List<string> ClosedStates { get; set; } = ["Closed", "Done", "Removed", "Resolved", "Completed"];
+    /// <summary>Move the work item to its In Progress state when an agent starts and to Resolved (if the process has it) when the PR opens.</summary>
+    public bool UpdateWorkItemState { get; set; } = true;
     /// <summary>Run an AI code review on every new pull request in repositories that allow it.</summary>
     public bool AutoReviewPullRequests { get; set; } = true;
-    public int SyncIntervalMinutes { get; set; } = 5;
-    /// <summary>Give platform users who are members of the project's Azure teams a project membership on every sync.</summary>
+    public int SyncIntervalMinutes { get; set; } = 10;
+
+    /// <summary>Give platform users who are in an Azure team a membership of that team's project on every sync.</summary>
     public bool AutoProvisionMembers { get; set; } = true;
     /// <summary>Create invitations for Azure team members who have no platform account yet.</summary>
     public bool AutoInviteTeamMembers { get; set; }
-    /// <summary>Project role per Azure team (by name). Empty = every team maps to Developer.</summary>
+    /// <summary>Developers of the Azure organization may create their own account (identity proven with their Azure PAT).</summary>
+    public bool AllowSelfSignUp { get; set; } = true;
+    /// <summary>Give every new developer a default agent built from the AI defaults below.</summary>
+    public bool CreateDefaultAgentForDevelopers { get; set; } = true;
+    /// <summary>Require the user's own Azure credential for writes they start (no fallback to the service identity).</summary>
+    public bool RequireUserCredentialForWrites { get; set; }
+    /// <summary>Project role per Azure team name. Empty = every team maps to Developer.</summary>
     public List<TeamRoleMapping> TeamRoles { get; set; } = [];
     /// <summary>Project role per Entra ID group (object id), applied when members sign in with Entra ID.</summary>
     public List<GroupRoleMapping> GroupRoles { get; set; } = [];
-    /// <summary>Require the user's own Azure credential for writes they start (no fallback to the service identity).</summary>
-    public bool RequireUserCredentialForWrites { get; set; }
+
+    /// <summary>Defaults for new agents.</summary>
+    public Agents.AgentRuntime DefaultRuntime { get; set; } = Agents.AgentRuntime.ClaudeCode;
+    public Agents.ModelProvider DefaultProvider { get; set; } = Agents.ModelProvider.Anthropic;
+    public string DefaultModel { get; set; } = "claude-sonnet-4-5";
+    /// <summary>Azure OpenAI resource endpoint (https://&lt;resource&gt;.openai.azure.com).</summary>
+    public string? AzureOpenAiEndpoint { get; set; }
 }
 
 public sealed class TeamRoleMapping

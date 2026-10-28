@@ -42,6 +42,7 @@ public sealed class AppFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("Encryption:Key", Convert.ToBase64String(new byte[32]));
         builder.UseSetting("Jobs:Enabled", "false");
         builder.UseSetting("AgentRuntime:WorkspaceRoot", Path.Combine(Root, "workspaces"));
+        builder.UseSetting("AgentRuntime:MirrorRoot", Path.Combine(Root, "mirrors"));
         builder.UseSetting("Messaging:AgentWorkers", "2");
         builder.UseSetting("App:PublicUrl", "https://agent.test");
         // CLI agents: dispatcher scripts that run whatever scenario a test installed (see SetCliScenario).
@@ -96,16 +97,32 @@ public sealed class AppFactory : WebApplicationFactory<Program>, IAsyncLifetime
     /// <summary>Creates a bare repository with one commit on main and registers it in the fake Azure project.</summary>
     public string CreateRemoteRepository(FakeAzureDevOps azure, string name)
     {
-        var bare = Path.Combine(Root, "remotes", $"{name}.git");
-        var seed = Path.Combine(Root, "seed", name);
+        var bare = Path.Combine(Root, "remotes", azure.Name, $"{name}.git");
+        var seed = Path.Combine(Root, "seed", azure.Name, name);
+        Directory.CreateDirectory(Path.GetDirectoryName(bare)!);
         Git(Root, "init", "--bare", "-b", "main", bare);
         Git(Root, "clone", bare, seed);
         File.WriteAllText(Path.Combine(seed, "README.md"), $"# {name}\n");
         Git(seed, "add", "-A");
         Git(seed, "commit", "-m", "init");
         Git(seed, "push", "origin", "main");
-        azure.Repositories.Add(new AzureRepository($"repo-{name}", name, "main", bare, $"https://dev.azure.com/contoso/Shop/_git/{name}"));
+        azure.Repositories.Add(new AzureRepository($"repo-{azure.Name}-{name}", name, "main", bare, $"https://dev.azure.com/contoso/{azure.Name}/_git/{name}", 1024));
         return bare;
+    }
+
+    /// <summary>Adds a commit to main of a repository made by <see cref="CreateRemoteRepository"/>.</summary>
+    public void Commit(FakeAzureDevOps azure, string name, string message, params (string Path, string Content)[] files)
+    {
+        var seed = Path.Combine(Root, "seed", azure.Name, name);
+        Git(seed, "pull", "--quiet", "origin", "main");
+        foreach (var (path, content) in files)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(seed, path))!);
+            File.WriteAllText(Path.Combine(seed, path), content);
+        }
+        Git(seed, "add", "-A");
+        Git(seed, "commit", "-m", message);
+        Git(seed, "push", "origin", "main");
     }
 
     public static string Git(string cwd, params string[] args)

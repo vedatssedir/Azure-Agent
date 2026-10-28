@@ -9,89 +9,54 @@ using Wolverine;
 
 namespace AzureAgent.Api.Modules;
 
+/// <summary>Agent definitions, their runs and what they cost.</summary>
 public sealed class AgentsModule : ICarterModule
 {
-    public sealed record SaveAgentRequest(string Name, AgentKind Kind, ModelProvider Provider, string Model, string? Instructions, string? PairedUniqueName,
-        Guid? TeamId, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd, AgentSettings? Settings, AgentRuntime Runtime = AgentRuntime.Framework);
-    public sealed record ProvisionRequest(ModelProvider Provider, string Model, IReadOnlyList<string>? SkillKeys, AgentRuntime Runtime = AgentRuntime.Framework);
-    public sealed record CapabilitiesRequest(IReadOnlyList<string> SkillKeys, IReadOnlyList<string> McpServerNames);
-    public sealed record StartRunRequest(Guid AgentId, int? WorkItemAzureId, Guid? PullRequestId);
-    public sealed record SkillRequest(string Name, string? Description, string Content);
-    public sealed record McpRequest(McpTransport Transport, string? Command, IReadOnlyList<string>? Arguments, string? Url, IReadOnlyList<string>? SecretNames);
+    public sealed record SaveAgentRequest(string Name, string? Title, AgentKind Kind, AgentRuntime Runtime, ModelProvider Provider, string Model, string? Instructions,
+        IReadOnlyList<AgentSkill>? Skills, Guid? OwnerUserId, Guid? ProjectId, bool IsDefault, bool Enabled, int MaxConcurrentRuns, decimal? MonthlyBudgetUsd,
+        AgentSettings? Settings);
+    public sealed record StartRunRequest(Guid ProjectId, Guid AgentId, int? WorkItemAzureId, Guid? PullRequestId);
 
     public void AddRoutes(IEndpointRouteBuilder app)
     {
-        var p = app.MapGroup("/api/projects/{projectId:guid}").WithTags("Agents").RequireAuthorization();
-        p.MapGet("/agents", (Guid projectId, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<AgentDto>>(new ListAgentsQuery(projectId), ct));
-        p.MapPost("/agents", (Guid projectId, SaveAgentRequest r, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<AgentDto>(ToCommand(projectId, null, r), ct));
-        p.MapPut("/agents/{agentId:guid}", (Guid projectId, Guid agentId, SaveAgentRequest r, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<AgentDto>(ToCommand(projectId, agentId, r), ct));
-        p.MapDelete("/agents/{agentId:guid}", async (Guid projectId, Guid agentId, IMessageBus bus, CancellationToken ct) =>
+        var agents = app.MapGroup("/api/agents").WithTags("Agents").RequireAuthorization();
+        agents.MapGet("/", (bool? mine, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<AgentDto>>(new ListAgentsQuery(mine == true), ct));
+        agents.MapPost("/", (SaveAgentRequest r, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<AgentDto>(ToCommand(null, r), ct));
+        agents.MapPut("/{agentId:guid}", (Guid agentId, SaveAgentRequest r, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<AgentDto>(ToCommand(agentId, r), ct));
+        agents.MapDelete("/{agentId:guid}", async (Guid agentId, IMessageBus bus, CancellationToken ct) =>
         {
-            await bus.InvokeAsync(new DeleteAgentCommand(projectId, agentId), ct);
-            return Results.NoContent();
-        });
-        p.MapPut("/agents/{agentId:guid}/capabilities", async (Guid projectId, Guid agentId, CapabilitiesRequest r, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(new SetAgentCapabilitiesCommand(projectId, agentId, r.SkillKeys, r.McpServerNames), ct);
+            await bus.InvokeAsync(new DeleteAgentCommand(agentId), ct);
             return Results.NoContent();
         });
         app.MapGet("/api/agent-runtimes", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<AgentRuntimeInfo>>(new ListAgentRuntimesQuery(), ct))
             .RequireAuthorization().WithTags("Agents");
-        p.MapPost("/teams/{teamId:guid}/provision-agents", async (Guid projectId, Guid teamId, ProvisionRequest r, IMessageBus bus, CancellationToken ct) =>
-            new { created = await bus.InvokeAsync<int>(new ProvisionTeamAgentsCommand(projectId, teamId, r.Provider, r.Model, r.SkillKeys, r.Runtime), ct) });
-        p.MapGet("/skill-suggestions", (Guid projectId, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<IReadOnlyList<SkillSuggestionDto>>(new SuggestSkillsQuery(projectId), ct));
 
-        p.MapGet("/runs", (Guid projectId, RunStatus? status, Guid? agentId, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<IReadOnlyList<RunSummaryDto>>(new ListRunsQuery(projectId, status, agentId), ct));
-        p.MapGet("/runs/{runId:guid}", (Guid projectId, Guid runId, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<RunDetailDto>(new GetRunQuery(projectId, runId), ct));
-        p.MapPost("/runs", async (Guid projectId, StartRunRequest r, IMessageBus bus, CancellationToken ct) =>
-            new { id = await bus.InvokeAsync<Guid>(new StartRunCommand(projectId, r.AgentId, r.WorkItemAzureId, r.PullRequestId), ct) });
-        p.MapPost("/runs/{runId:guid}/approve", async (Guid projectId, Guid runId, IMessageBus bus, CancellationToken ct) =>
+        var runs = app.MapGroup("/api/runs").WithTags("Runs").RequireAuthorization();
+        runs.MapGet("/", (Guid? project, RunStatus? status, Guid? agent, bool? mine, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<IReadOnlyList<RunSummaryDto>>(new ListRunsQuery(project, status, agent, mine == true), ct));
+        runs.MapPost("/", async (StartRunRequest r, IMessageBus bus, CancellationToken ct) =>
+            new { id = await bus.InvokeAsync<Guid>(new StartRunCommand(r.ProjectId, r.AgentId, r.WorkItemAzureId, r.PullRequestId), ct) });
+        runs.MapGet("/{runId:guid}", (Guid runId, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<RunDetailDto>(new GetRunQuery(runId), ct));
+        runs.MapPost("/{runId:guid}/approve", async (Guid runId, IMessageBus bus, CancellationToken ct) =>
         {
-            await bus.InvokeAsync<ExecuteAgentRun>(new ApproveRunCommand(projectId, runId), ct);
+            await bus.InvokeAsync<ExecuteAgentRun>(new ApproveRunCommand(runId), ct);
             return Results.NoContent();
         });
-        p.MapPost("/runs/{runId:guid}/cancel", async (Guid projectId, Guid runId, IMessageBus bus, CancellationToken ct) =>
+        runs.MapPost("/{runId:guid}/cancel", async (Guid runId, IMessageBus bus, CancellationToken ct) =>
         {
-            await bus.InvokeAsync(new CancelRunCommand(projectId, runId), ct);
+            await bus.InvokeAsync(new CancelRunCommand(runId), ct);
             return Results.NoContent();
         });
-        p.MapPost("/runs/{runId:guid}/retry", async (Guid projectId, Guid runId, IMessageBus bus, CancellationToken ct) =>
-            new { id = await bus.InvokeAsync<Guid>(new RetryRunCommand(projectId, runId), ct) });
+        runs.MapPost("/{runId:guid}/retry", async (Guid runId, IMessageBus bus, CancellationToken ct) =>
+            new { id = await bus.InvokeAsync<Guid>(new RetryRunCommand(runId), ct) });
 
-        p.MapGet("/costs", (Guid projectId, DateTimeOffset? from, DateTimeOffset? to, CostGrouping? groupBy, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<CostReport>(new GetCostReportQuery(projectId, from, to, groupBy ?? CostGrouping.Agent), ct));
-        p.MapGet("/budgets", (Guid projectId, IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<BudgetLine>>(new GetBudgetStatusQuery(projectId), ct));
-
-        var org = app.MapGroup("/api").WithTags("Catalog").RequireAuthorization();
-        org.MapGet("/skills", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<SkillDto>>(new ListSkillsQuery(), ct));
-        org.MapPut("/skills/{key}", (string key, SkillRequest r, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<SkillDto>(new SaveSkillCommand(key, r.Name, r.Description, r.Content), ct));
-        org.MapDelete("/skills/{key}", async (string key, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(new DeleteSkillCommand(key), ct);
-            return Results.NoContent();
-        });
-        org.MapGet("/mcp-servers", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<McpServerDto>>(new ListMcpServersQuery(), ct));
-        org.MapPut("/mcp-servers/{name}", (string name, McpRequest r, IMessageBus bus, CancellationToken ct) =>
-            bus.InvokeAsync<McpServerDto>(new SaveMcpServerCommand(name, r.Transport, r.Command, r.Arguments, r.Url, r.SecretNames), ct));
-        org.MapDelete("/mcp-servers/{name}", async (string name, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(new DeleteMcpServerCommand(name), ct);
-            return Results.NoContent();
-        });
-        org.MapGet("/catalog", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<CatalogDto>(new GetCatalogQuery(), ct));
-        org.MapGet("/model-prices", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<ModelPriceDto>>(new ListModelPricesQuery(), ct));
-        org.MapPut("/model-prices", async (SaveModelPriceCommand c, IMessageBus bus, CancellationToken ct) =>
-        {
-            await bus.InvokeAsync(c, ct);
-            return Results.NoContent();
-        });
+        var costs = app.MapGroup("/api/costs").WithTags("Costs").RequireAuthorization();
+        costs.MapGet("/", (Guid? project, DateTimeOffset? from, DateTimeOffset? to, CostGrouping? groupBy, IMessageBus bus, CancellationToken ct) =>
+            bus.InvokeAsync<CostReport>(new GetCostReportQuery(project, from, to, groupBy ?? CostGrouping.Agent), ct));
+        costs.MapGet("/budgets", (IMessageBus bus, CancellationToken ct) => bus.InvokeAsync<IReadOnlyList<BudgetLine>>(new GetBudgetStatusQuery(), ct));
     }
 
-    private static SaveAgentCommand ToCommand(Guid projectId, Guid? agentId, SaveAgentRequest r) =>
-        new(projectId, agentId, r.Name, r.Kind, r.Provider, r.Model, r.Instructions, r.PairedUniqueName, r.TeamId, r.Enabled, r.MaxConcurrentRuns, r.MonthlyBudgetUsd, r.Settings,
-            r.Runtime);
+    private static SaveAgentCommand ToCommand(Guid? agentId, SaveAgentRequest r) =>
+        new(agentId, r.Name, r.Title, r.Kind, r.Runtime, r.Provider, r.Model, r.Instructions, r.Skills, r.OwnerUserId, r.ProjectId, r.IsDefault, r.Enabled,
+            r.MaxConcurrentRuns, r.MonthlyBudgetUsd, r.Settings);
 }

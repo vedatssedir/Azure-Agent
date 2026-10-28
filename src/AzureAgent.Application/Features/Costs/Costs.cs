@@ -15,6 +15,8 @@ public enum CostGrouping
     Day = 2,
     Model = 3,
     Kind = 4,
+    Project = 5,
+    Developer = 6,
 }
 
 public sealed record CostRow(string Key, string Label, int Runs, int SucceededRuns, long InputTokens, long OutputTokens, decimal CostUsd,
@@ -23,8 +25,8 @@ public sealed record CostRow(string Key, string Label, int Runs, int SucceededRu
 public sealed record CostReport(DateTimeOffset From, DateTimeOffset To, CostGrouping GroupBy, decimal TotalCostUsd, long TotalTokens, int TotalRuns,
     decimal CostPerSucceededRunUsd, IReadOnlyList<CostRow> Rows);
 
-/// <summary>Cost-per-job analysis: spend, tokens and run outcomes grouped by agent, work item, day, model or run kind.</summary>
-public sealed record GetCostReportQuery(Guid ProjectId, DateTimeOffset? From, DateTimeOffset? To, CostGrouping GroupBy);
+/// <summary>Cost-per-job analysis across the organization (or one project) grouped by agent, developer, project, work item, day, model or run kind.</summary>
+public sealed record GetCostReportQuery(Guid? ProjectId, DateTimeOffset? From, DateTimeOffset? To, CostGrouping GroupBy);
 
 public sealed class GetCostReportQueryValidator : AbstractValidator<GetCostReportQuery>
 {
@@ -40,25 +42,34 @@ public static class GetCostReportHandler
 {
     public static async Task<CostReport> Handle(GetCostReportQuery query, IAppDbContext db, AccessControl access, IClock clock, CancellationToken ct)
     {
-        await access.RequireAsync(query.ProjectId, Permission.CostsView, ct);
+        access.RequireOrganization();
+        var projects = new List<Guid>();
+        foreach (var id in await db.Projects.AsNoTracking().Where(p => query.ProjectId == null || p.Id == query.ProjectId).Select(p => p.Id).ToListAsync(ct))
+            if ((await access.PermissionsAsync(id, null, ct)).Contains(Permission.CostsView)) projects.Add(id);
+        if (projects.Count == 0) throw new ForbiddenException($"Missing permission '{Permission.CostsView}'");
         var to = query.To ?? clock.UtcNow;
         var from = query.From ?? to.AddDays(-30);
         var runs = await db.AgentRuns.AsNoTracking()
-            .Where(r => r.ProjectId == query.ProjectId && r.CreatedAt >= from && r.CreatedAt < to)
+            .Where(r => projects.Contains(r.ProjectId) && r.CreatedAt >= from && r.CreatedAt < to)
             .Join(db.Agents, r => r.AgentId, a => a.Id, (r, a) => new
             {
-                r.AgentId, AgentName = a.Name, r.WorkItemAzureId, r.Kind, r.Status, r.InputTokens, r.OutputTokens, r.CostUsd, r.CreatedAt,
-                r.StartedAt, r.FinishedAt, Model = r.Model ?? a.Model,
+                r.AgentId, AgentName = a.Name, a.OwnerUserId, r.ProjectId, r.WorkItemId, r.WorkItemAzureId, r.Kind, r.Status, r.InputTokens, r.OutputTokens,
+                r.CostUsd, r.CreatedAt, r.StartedAt, r.FinishedAt, Model = r.Model ?? a.Model,
             })
             .ToListAsync(ct);
-        var titles = await db.WorkItems.AsNoTracking().Where(w => w.ProjectId == query.ProjectId).ToDictionaryAsync(w => w.AzureId, w => w.Title, ct);
-
+        var itemIds = runs.Where(r => r.WorkItemId != null).Select(r => r.WorkItemId!.Value).Distinct().ToList();
+        var titles = await db.WorkItems.AsNoTracking().Where(w => itemIds.Contains(w.Id)).ToDictionaryAsync(w => w.Id, w => w.Title, ct);
+        var projectNames = await db.Projects.AsNoTracking().Where(p => projects.Contains(p.Id)).ToDictionaryAsync(p => p.Id, p => p.Name, ct);
+        var ownerIds = runs.Where(r => r.OwnerUserId != null).Select(r => r.OwnerUserId!.Value).Distinct().ToList();
+        var owners = await db.Users.AsNoTracking().Where(u => ownerIds.Contains(u.Id)).ToDictionaryAsync(u => u.Id, u => u.DisplayName, ct);
         var rows = runs.GroupBy(r => query.GroupBy switch
             {
                 CostGrouping.Agent => (r.AgentId.ToString(), r.AgentName),
-                CostGrouping.WorkItem => r.WorkItemAzureId is { } id ? (id.ToString(), $"#{id} {titles.GetValueOrDefault(id)}") : ("review", "Pull request reviews"),
+                CostGrouping.WorkItem => r.WorkItemId is { } id ? (id.ToString(), $"#{r.WorkItemAzureId} {titles.GetValueOrDefault(id)}") : ("review", "Pull request reviews"),
                 CostGrouping.Day => (r.CreatedAt.UtcDateTime.ToString("yyyy-MM-dd"), r.CreatedAt.UtcDateTime.ToString("yyyy-MM-dd")),
                 CostGrouping.Model => (r.Model, r.Model),
+                CostGrouping.Project => (r.ProjectId.ToString(), projectNames.GetValueOrDefault(r.ProjectId) ?? "?"),
+                CostGrouping.Developer => r.OwnerUserId is { } o ? (o.ToString(), owners.GetValueOrDefault(o) ?? "?") : ("shared", "Shared agents"),
                 _ => (r.Kind.ToString(), r.Kind.ToString()),
             })
             .Select(g =>
@@ -69,7 +80,6 @@ public static class GetCostReportHandler
                     g.Sum(r => r.OutputTokens), cost, Math.Round(cost / g.Count(), 6), durations.Count > 0 ? Math.Round(durations.Average(), 2) : 0);
             })
             .OrderByDescending(r => query.GroupBy == CostGrouping.Day ? 0 : r.CostUsd).ThenByDescending(r => r.Key).ToList();
-
         var total = runs.Sum(r => r.CostUsd);
         var succeeded = runs.Count(r => r.Status == RunStatus.Succeeded);
         return new CostReport(from, to, query.GroupBy, total, runs.Sum(r => r.InputTokens + r.OutputTokens), runs.Count,
@@ -79,14 +89,14 @@ public static class GetCostReportHandler
 
 public sealed record BudgetLine(string Scope, string Name, decimal? LimitUsd, decimal SpentUsd, double? UsedPercent);
 
-public sealed record GetBudgetStatusQuery(Guid ProjectId);
+public sealed record GetBudgetStatusQuery;
 
 public static class GetBudgetStatusHandler
 {
-    public static async Task<IReadOnlyList<BudgetLine>> Handle(GetBudgetStatusQuery query, IAppDbContext db, AccessControl access, BudgetGuard budgets, CancellationToken ct)
+    public static async Task<IReadOnlyList<BudgetLine>> Handle(GetBudgetStatusQuery _, AccessControl access, BudgetGuard budgets, CancellationToken ct)
     {
-        await access.RequireAsync(query.ProjectId, Permission.CostsView, ct);
-        return await budgets.StatusAsync(query.ProjectId, ct);
+        await access.RequireOrganizationAdminAsync(ct);
+        return await budgets.StatusAsync(access.RequireOrganization(), null, ct);
     }
 }
 
@@ -95,94 +105,45 @@ public sealed class BudgetGuard(IAppDbContext db, IClock clock)
 {
     private DateTimeOffset MonthStart => new(clock.UtcNow.Year, clock.UtcNow.Month, 1, 0, 0, 0, TimeSpan.Zero);
 
-    public async Task<IReadOnlyList<BudgetLine>> StatusAsync(Guid projectId, CancellationToken ct)
+    private static BudgetLine Line(string scope, string name, decimal? limit, decimal spent) =>
+        new(scope, name, limit, spent, limit is > 0 ? Math.Round((double)(spent / limit.Value) * 100, 1) : null);
+
+    /// <summary>Organization, every project (or the given one) and every agent this month.</summary>
+    public async Task<IReadOnlyList<BudgetLine>> StatusAsync(Guid organizationId, Guid? projectId, CancellationToken ct)
     {
-        var project = await db.Projects.AsNoTracking().FirstAsync(p => p.Id == projectId, ct);
-        var organization = await db.Organizations.AsNoTracking().FirstAsync(o => o.Id == project.OrganizationId, ct);
+        // Organizations are not tenant-filtered; the other sets are.
+        var organization = await db.Organizations.AsNoTracking().FirstAsync(o => o.Id == organizationId, ct);
         var month = db.AgentRuns.AsNoTracking().Where(r => r.CreatedAt >= MonthStart);
         var orgSpent = await month.SumAsync(r => r.CostUsd, ct);
-        var projectSpent = await month.Where(r => r.ProjectId == projectId).SumAsync(r => r.CostUsd, ct);
-        var agentSpend = await month.Where(r => r.ProjectId == projectId).GroupBy(r => r.AgentId).Select(g => new { g.Key, Spent = g.Sum(r => r.CostUsd) })
-            .ToDictionaryAsync(x => x.Key, x => x.Spent, ct);
-        var agents = await db.Agents.AsNoTracking().Where(a => a.ProjectId == projectId).OrderBy(a => a.Name).ToListAsync(ct);
-
-        static BudgetLine Line(string scope, string name, decimal? limit, decimal spent) =>
-            new(scope, name, limit, spent, limit is > 0 ? Math.Round((double)(spent / limit.Value) * 100, 1) : null);
-
+        var projectSpend = await month.GroupBy(r => r.ProjectId).Select(g => new { g.Key, Spent = g.Sum(r => r.CostUsd) }).ToDictionaryAsync(x => x.Key, x => x.Spent, ct);
+        var agentSpend = await month.GroupBy(r => r.AgentId).Select(g => new { g.Key, Spent = g.Sum(r => r.CostUsd) }).ToDictionaryAsync(x => x.Key, x => x.Spent, ct);
+        var projects = await db.Projects.AsNoTracking().Where(p => !p.IsRemoved && (projectId == null || p.Id == projectId)).OrderBy(p => p.Name).ToListAsync(ct);
+        var agents = await db.Agents.AsNoTracking().OrderBy(a => a.Name).ToListAsync(ct);
         return
         [
             Line("organization", organization.Name, organization.MonthlyBudgetUsd, orgSpent),
-            Line("project", project.Name, project.MonthlyBudgetUsd, projectSpent),
+            .. projects.Select(p => Line("project", p.Name, p.MonthlyBudgetUsd, projectSpend.GetValueOrDefault(p.Id))),
             .. agents.Select(a => Line("agent", a.Name, a.MonthlyBudgetUsd, agentSpend.GetValueOrDefault(a.Id))),
         ];
     }
 
-    /// <summary>Returns the exhausted budget, or null when the agent may spend.</summary>
-    public async Task<string?> ExhaustedAsync(Agent agent, CancellationToken ct)
+    /// <summary>Returns the exhausted budget, or null when the agent may spend on the project.</summary>
+    public async Task<string?> ExhaustedAsync(Agent agent, Guid projectId, CancellationToken ct)
     {
-        foreach (var line in await StatusAsync(agent.ProjectId, ct))
-        {
-            if (line.Scope == "agent" && line.Name != agent.Name) continue;
-            if (line.LimitUsd is { } limit && line.SpentUsd >= limit) return $"{line.Scope} budget for {line.Name} is exhausted ({line.SpentUsd:0.00}/{limit:0.00} USD)";
-        }
+        var organization = await db.Organizations.AsNoTracking().FirstAsync(o => o.Id == agent.OrganizationId, ct);
+        var project = await db.Projects.AsNoTracking().FirstAsync(p => p.Id == projectId, ct);
+        var month = db.AgentRuns.AsNoTracking().Where(r => r.CreatedAt >= MonthStart);
+        if (organization.MonthlyBudgetUsd is { } orgLimit && await month.SumAsync(r => r.CostUsd, ct) is var orgSpent && orgSpent >= orgLimit)
+            return $"organization budget for {organization.Name} is exhausted ({orgSpent:0.00}/{orgLimit:0.00} USD)";
+        if (project.MonthlyBudgetUsd is { } projectLimit && await month.Where(r => r.ProjectId == projectId).SumAsync(r => r.CostUsd, ct) is var projectSpent && projectSpent >= projectLimit)
+            return $"project budget for {project.Name} is exhausted ({projectSpent:0.00}/{projectLimit:0.00} USD)";
+        if (agent.MonthlyBudgetUsd is { } agentLimit && await month.Where(r => r.AgentId == agent.Id).SumAsync(r => r.CostUsd, ct) is var agentSpent && agentSpent >= agentLimit)
+            return $"agent budget for {agent.Name} is exhausted ({agentSpent:0.00}/{agentLimit:0.00} USD)";
         return null;
     }
 }
 
-// Model prices ----------------------------------------------------------------------------------
-
-public sealed record ModelPriceDto(Guid Id, bool IsDefault, ModelProvider Provider, string Model, decimal InputPerMillion, decimal OutputPerMillion, decimal CachedInputPerMillion);
-
-public sealed record ListModelPricesQuery;
-
-public static class ListModelPricesHandler
-{
-    public static async Task<IReadOnlyList<ModelPriceDto>> Handle(ListModelPricesQuery _, IAppDbContext db, AccessControl access, CancellationToken ct)
-    {
-        var organizationId = access.RequireOrganization();
-        if (await access.OrganizationRoleAsync(ct) is null) throw new ForbiddenException();
-        return await db.ModelPrices.AsNoTracking().Where(p => p.OrganizationId == null || p.OrganizationId == organizationId)
-            .OrderBy(p => p.Provider).ThenBy(p => p.Model)
-            .Select(p => new ModelPriceDto(p.Id, p.OrganizationId == null, p.Provider, p.Model, p.InputPerMillion, p.OutputPerMillion, p.CachedInputPerMillion))
-            .ToListAsync(ct);
-    }
-}
-
-public sealed record SaveModelPriceCommand(ModelProvider Provider, string Model, decimal InputPerMillion, decimal OutputPerMillion, decimal CachedInputPerMillion);
-
-public sealed class SaveModelPriceCommandValidator : AbstractValidator<SaveModelPriceCommand>
-{
-    public SaveModelPriceCommandValidator()
-    {
-        RuleFor(x => x.Provider).IsInEnum();
-        RuleFor(x => x.Model).NotEmpty().MaximumLength(100);
-        RuleFor(x => x.InputPerMillion).InclusiveBetween(0, 10_000);
-        RuleFor(x => x.OutputPerMillion).InclusiveBetween(0, 10_000);
-        RuleFor(x => x.CachedInputPerMillion).InclusiveBetween(0, 10_000);
-    }
-}
-
-public static class SaveModelPriceHandler
-{
-    public static async Task Handle(SaveModelPriceCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, CancellationToken ct)
-    {
-        await access.RequireOrganizationAdminAsync(ct);
-        var organizationId = access.RequireOrganization();
-        var price = await db.ModelPrices.FirstOrDefaultAsync(p => p.OrganizationId == organizationId && p.Provider == command.Provider && p.Model == command.Model, ct);
-        if (price is null)
-        {
-            price = new ModelPrice { OrganizationId = organizationId, Provider = command.Provider, Model = command.Model };
-            db.ModelPrices.Add(price);
-        }
-        price.InputPerMillion = command.InputPerMillion;
-        price.OutputPerMillion = command.OutputPerMillion;
-        price.CachedInputPerMillion = command.CachedInputPerMillion;
-        db.Audit(user, organizationId, "model_price.saved", "model_price", $"{command.Provider}/{command.Model}", command);
-        await db.SaveChangesAsync(ct);
-    }
-}
-
-/// <summary>Price lookup: organization override, then instance default, matching the longest model prefix.</summary>
+/// <summary>Built-in model prices (per 1M tokens) used to put a cost on every model call.</summary>
 public sealed class PriceList(IAppDbContext db)
 {
     public async Task<ModelPrice?> FindAsync(Guid organizationId, ModelProvider provider, string model, CancellationToken ct)
