@@ -40,6 +40,19 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options, ITenant
     private Guid? CurrentOrganizationId => tenant.OrganizationId;
     private bool BypassTenantFilter => tenant.BypassFilter;
 
+    /// <summary>
+    /// Npgsql only writes UTC offsets to timestamptz; values from git (author time zone) or parsed local
+    /// strings carry others, so every DateTimeOffset is normalized to UTC on the way in.
+    /// </summary>
+    protected override void ConfigureConventions(ModelConfigurationBuilder configuration)
+    {
+        configuration.Properties<DateTimeOffset>().HaveConversion<UtcDateTimeOffsetConverter>();
+        configuration.Properties<DateTimeOffset?>().HaveConversion<UtcDateTimeOffsetConverter>();
+    }
+
+    private sealed class UtcDateTimeOffsetConverter() : Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<DateTimeOffset, DateTimeOffset>(
+        v => v.ToUniversalTime(), v => v);
+
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.HasDefaultSchema("app");

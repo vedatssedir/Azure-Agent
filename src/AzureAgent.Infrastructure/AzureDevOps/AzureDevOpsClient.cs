@@ -4,14 +4,15 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AzureAgent.Application.Abstractions;
+using AzureAgent.Application.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AzureAgent.Infrastructure.AzureDevOps;
 
 public sealed class AzureDevOpsException(HttpStatusCode status, string method, string path)
-    : Exception($"Azure DevOps {method} {path} failed with HTTP {(int)status}")
+    : AzureRequestException((int)status, $"Azure DevOps {method} {path} failed with HTTP {(int)status}")
 {
-    public HttpStatusCode Status { get; } = status;
+    public HttpStatusCode HttpStatus { get; } = status;
 }
 
 public sealed class AzureDevOpsClientFactory(IHttpClientFactory httpClients, ILoggerFactory loggers) : IAzureDevOpsClientFactory
@@ -235,7 +236,7 @@ public sealed class AzureDevOpsClient(HttpClient http, AzureConnectionInfo conne
                 null, ct);
             return node?["content"]?.GetValue<string>();
         }
-        catch (AzureDevOpsException e) when (e.Status == HttpStatusCode.NotFound)
+        catch (AzureDevOpsException e) when (e.HttpStatus == HttpStatusCode.NotFound)
         {
             return null;
         }

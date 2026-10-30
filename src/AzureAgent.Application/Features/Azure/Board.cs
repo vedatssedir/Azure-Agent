@@ -196,8 +196,9 @@ public static class MoveWorkItemHandler
         var fields = new Dictionary<string, object?> { ["System.State"] = state };
         if (board.ColumnField is { Length: > 0 } columnField && board.Columns.Count(c => c.StateMappings.Any(m => m.WorkItemType == item.Type && m.State == state)) > 1)
             fields[columnField] = column.Name;
-        var (project, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
-        WorkItemMapping.Apply(item, await azure.UpdateWorkItemFieldsAsync(command.AzureId, fields, ct));
+        var (project, updated, asUser) = await connector.WriteAsUserAsync(command.ProjectId, access.RequireUser(),
+            azure => azure.UpdateWorkItemFieldsAsync(command.AzureId, fields, ct), ct);
+        WorkItemMapping.Apply(item, updated);
         item.BoardColumn = column.Name;
         db.Audit(user, project.OrganizationId, "work_item.moved", "work_item", command.AzureId, new { column = column.Name, state, asUser }, project.Id);
         await db.SaveChangesAsync(ct);
@@ -318,11 +319,14 @@ public static class AddWorkItemCommentHandler
     public static async Task Handle(AddWorkItemCommentCommand command, IAppDbContext db, AccessControl access, ICurrentUser user, AzureConnector connector, CancellationToken ct)
     {
         await access.RequireAsync(command.ProjectId, Permission.WorkItemsAssign, ct);
-        var (project, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
         var text = string.Join("", command.Text.Trim().Split('\n').Select(l => $"<div>{System.Net.WebUtility.HtmlEncode(l.TrimEnd('\r'))}</div>"));
         // Comments written with the service identity say who wrote them.
-        if (!asUser) text = $"<div><i>{System.Net.WebUtility.HtmlEncode(user.ActorName)} via Azure Agent:</i></div>{text}";
-        await azure.AddWorkItemCommentAsync(command.AzureId, text, ct);
+        var signed = $"<div><i>{System.Net.WebUtility.HtmlEncode(user.ActorName)} via Azure Agent:</i></div>{text}";
+        var (project, _, asUser) = await connector.WriteAsUserAsync(command.ProjectId, access.RequireUser(), async (azure, personal) =>
+        {
+            await azure.AddWorkItemCommentAsync(command.AzureId, personal ? text : signed, ct);
+            return true;
+        }, ct);
         db.Audit(user, project.OrganizationId, "work_item.commented", "work_item", command.AzureId, new { asUser }, project.Id);
         await db.SaveChangesAsync(ct);
     }
@@ -367,8 +371,9 @@ public static class UpdateWorkItemHandler
         if (command.Priority is { } priority && type?.Fields.Contains(WorkItemMapping.PriorityField) != false) fields[WorkItemMapping.PriorityField] = priority;
         if (command.Tags is not null) fields["System.Tags"] = string.Join("; ", command.Tags.Distinct(StringComparer.OrdinalIgnoreCase));
         if (fields.Count == 0) throw new BusinessRuleException("Nothing to change");
-        var (_, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
-        WorkItemMapping.Apply(item, await azure.UpdateWorkItemFieldsAsync(command.AzureId, fields, ct));
+        var (_, updated, asUser) = await connector.WriteAsUserAsync(command.ProjectId, access.RequireUser(),
+            azure => azure.UpdateWorkItemFieldsAsync(command.AzureId, fields, ct), ct);
+        WorkItemMapping.Apply(item, updated);
         db.Audit(user, project.OrganizationId, "work_item.updated", "work_item", command.AzureId, new { fields = fields.Keys, asUser }, project.Id);
         await db.SaveChangesAsync(ct);
         var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
@@ -404,8 +409,9 @@ public static class AssignWorkItemHandler
             ?? throw new NotFoundException("Work item");
         var target = command.ToMe ? await WorkItemProjection.MyAzureNameAsync(db, user, command.ProjectId, ct) : command.UniqueName?.Trim().ToLowerInvariant();
         // The change is made with the caller's own Azure credential when connected, so Azure history shows them.
-        var (project, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
-        WorkItemMapping.Apply(item, await azure.UpdateWorkItemFieldsAsync(command.AzureId, new Dictionary<string, object?> { ["System.AssignedTo"] = target ?? "" }, ct));
+        var (project, updated, asUser) = await connector.WriteAsUserAsync(command.ProjectId, access.RequireUser(),
+            azure => azure.UpdateWorkItemFieldsAsync(command.AzureId, new Dictionary<string, object?> { ["System.AssignedTo"] = target ?? "" }, ct), ct);
+        WorkItemMapping.Apply(item, updated);
         db.Audit(user, project.OrganizationId, "work_item.assigned", "work_item", command.AzureId, new { to = target, asUser }, project.Id);
         await db.SaveChangesAsync(ct);
         var messages = await dispatcher.QueueAssignedWorkAsync(project, ct);
@@ -445,7 +451,7 @@ public static class CreateWorkItemHandler
         if (unknown.Count > 0) throw new BusinessRuleException($"Unknown repositories: {string.Join(", ", unknown)}");
         if (command.AgentSlug is { } slug && !await db.Agents.AnyAsync(a => a.Slug == slug, ct)) throw new BusinessRuleException($"Unknown agent: {slug}");
 
-        var (project, azure, asUser) = await connector.ConnectAsUserAsync(command.ProjectId, access.RequireUser(), ct);
+        var project = await WorkItemProjection.ProjectAsync(db, command.ProjectId, ct);
         var tags = command.RepositoryNames.Select(n => $"repo:{repositories.First(r => r.Equals(n, StringComparison.OrdinalIgnoreCase))}")
             .Concat(command.AgentSlug is { } agent ? [$"agent:{agent}"] : [])
             .Concat(command.Tags ?? []).Distinct(StringComparer.OrdinalIgnoreCase);
@@ -467,11 +473,15 @@ public static class CreateWorkItemHandler
             else fields["System.Description"] = $"{fields["System.Description"]}<h3>Acceptance criteria</h3>{criteria}";
         }
         if (command.Priority is { } priority && type.Fields.Contains(WorkItemMapping.PriorityField)) fields[WorkItemMapping.PriorityField] = priority;
-        var created = await azure.CreateWorkItemAsync(type.Name, fields, ct);
+        var (_, (created, webUrl), asUser) = await connector.WriteAsUserAsync(command.ProjectId, access.RequireUser(), async azure =>
+        {
+            var result = await azure.CreateWorkItemAsync(type.Name, fields, ct);
+            return (result, azure.WorkItemWebUrl(result.Id));
+        }, ct);
         var item = new WorkItem
         {
             OrganizationId = project.OrganizationId, ProjectId = project.Id, AzureId = created.Id, Type = "", Title = "", State = "",
-            WebUrl = azure.WorkItemWebUrl(created.Id),
+            WebUrl = webUrl,
         };
         WorkItemMapping.Apply(item, created);
         db.WorkItems.Add(item);

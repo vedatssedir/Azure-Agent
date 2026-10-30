@@ -15,3 +15,12 @@ public sealed class UnauthorizedException(string message = "Authentication requi
 public sealed class ConflictException(string message) : AppException(message, 409);
 
 public sealed class BusinessRuleException(string message) : AppException(message, 422);
+
+/// <summary>An Azure DevOps request that failed; <see cref="Status"/> is Azure's HTTP status.</summary>
+public class AzureRequestException(int status, string message) : Exception(message)
+{
+    public int Status { get; } = status;
+
+    /// <summary>Azure rejected the credential: expired, revoked or missing a scope.</summary>
+    public bool IsAuthFailure => Status is 401 or 403;
+}

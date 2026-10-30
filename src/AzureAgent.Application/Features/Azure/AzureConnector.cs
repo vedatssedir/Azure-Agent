@@ -67,4 +67,30 @@ public sealed class AzureConnector(IAppDbContext db, SecretResolver secrets, IAz
         var client = factory.Create(new AzureConnectionInfo(project.AzureOrganizationUrl, project.AzureProjectName, credential));
         return (project, client, personal is not null);
     }
+
+    /// <summary>
+    /// Runs a write as the user. When Azure rejects the personal credential (expired, revoked or
+    /// missing the Work Items write scope) the write is retried with the service identity, unless the
+    /// organization requires personal credentials for writes.
+    /// </summary>
+    public async Task<(Project Project, T Result, bool AsUser)> WriteAsUserAsync<T>(Guid projectId, Guid userId,
+        Func<IAzureDevOpsClient, bool, Task<T>> write, CancellationToken ct)
+    {
+        var (project, client, asUser) = await ConnectAsUserAsync(projectId, userId, ct);
+        try
+        {
+            return (project, await write(client, asUser), asUser);
+        }
+        catch (AzureRequestException e) when (asUser && e.IsAuthFailure)
+        {
+            if ((await OrganizationAsync(project.OrganizationId, ct)).Settings.RequireUserCredentialForWrites)
+                throw new BusinessRuleException($"Azure DevOps rejected your Azure connection (HTTP {e.Status}). Reconnect it with the Work Items (Read & write) scope (My account → Azure DevOps connection)");
+            var service = factory.Create(new AzureConnectionInfo(project.AzureOrganizationUrl, project.AzureProjectName,
+                await ServiceCredentialAsync(project.OrganizationId, ct)));
+            return (project, await write(service, false), false);
+        }
+    }
+
+    public Task<(Project Project, T Result, bool AsUser)> WriteAsUserAsync<T>(Guid projectId, Guid userId, Func<IAzureDevOpsClient, Task<T>> write,
+        CancellationToken ct) => WriteAsUserAsync(projectId, userId, (azure, _) => write(azure), ct);
 }

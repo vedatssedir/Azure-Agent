@@ -143,6 +143,34 @@ public sealed class IdentityTests(AppFactory factory) : PlatformTestBase(factory
     }
 
     [Fact]
+    public async Task A_personal_credential_azure_rejects_falls_back_to_the_service_identity()
+    {
+        var (admin, organizationId) = await AdminAsync();
+        var project = await NewProjectAsync(admin, organizationId, "Rejected", azure => azure.AddWorkItem(711, "Tidy logging", "To Do"));
+        var azure = Azure.Project("Rejected");
+        var joe = await DeveloperAsync("joe@contoso.com", "Joe Smith", organizationId);
+        var pat = Azure.TokenIdentities.First(t => t.Value.UniqueName == "joe@contoso.com").Key;
+        Azure.ReadOnlyTokens.Add(pat);
+        try
+        {
+            var board = await joe.Get<BoardDto>($"/api/projects/{project.Id}/board");
+            (await joe.Post<WorkItemSummaryDto>($"/api/projects/{project.Id}/work-items/711/move", new { board.TeamId, board = "Issues", column = "Doing" }))
+                .State.ShouldBe("Doing");
+            azure.Writes.Last(w => w.WorkItemId == 711).Owner.ShouldBe("service");
+
+            await UpdateSettingsAsync(admin, new { requireUserCredentialForWrites = true });
+            var blocked = await joe.Send(HttpMethod.Post, $"/api/projects/{project.Id}/work-items/711/move", new { board.TeamId, board = "Issues", column = "Done" });
+            blocked.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
+            (await blocked.Content.ReadAsStringAsync()).ShouldContain("rejected your Azure connection");
+        }
+        finally
+        {
+            Azure.ReadOnlyTokens.Remove(pat);
+            await UpdateSettingsAsync(admin, new { requireUserCredentialForWrites = false });
+        }
+    }
+
+    [Fact]
     public async Task Entra_sign_in_creates_accounts_only_for_known_people()
     {
         var (admin, organizationId) = await AdminAsync();
