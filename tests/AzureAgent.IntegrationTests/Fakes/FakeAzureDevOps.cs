@@ -21,6 +21,8 @@ public sealed class FakeAzureDevOpsFactory : IAzureDevOpsClientFactory
     public ConcurrentDictionary<string, AzureIdentity> TokenIdentities { get; } = new();
     /// <summary>When set, only these tokens are accepted.</summary>
     public HashSet<string>? AcceptedTokens { get; set; }
+    /// <summary>Tokens that can read but whose work item writes get HTTP 401 (expired, or missing the write scope).</summary>
+    public HashSet<string> ReadOnlyTokens { get; } = [];
 
     public FakeAzureDevOps Project(string name) => _projects.GetOrAdd(name, n => new FakeAzureDevOps(this, $"azure-{n.ToLowerInvariant()}", n));
 
@@ -199,6 +201,8 @@ public sealed class FakeAzureDevOps(FakeAzureDevOpsFactory organization, string 
 
     public Task<AzureWorkItem> UpdateWorkItemFieldsAsync(int id, IReadOnlyDictionary<string, object?> fields, CancellationToken ct)
     {
+        if (CurrentCredential.Value is { } credential && organization.ReadOnlyTokens.Contains(credential.Token))
+            throw new AzureAgent.Application.Common.AzureRequestException(401, $"Azure DevOps PATCH /_apis/wit/workitems/{id} failed with HTTP 401");
         var (rev, current) = WorkItems[id];
         foreach (var (key, value) in fields)
             current[key] = key == "System.AssignedTo" ? (value is string s && s.Length > 0 ? Identity(s) : null) : JsonValue.Create(value?.ToString());

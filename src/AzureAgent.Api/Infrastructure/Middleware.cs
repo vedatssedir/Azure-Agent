@@ -22,6 +22,9 @@ public sealed class ProblemExceptionHandler(IProblemDetailsService problems, ILo
             AppException a => (a.StatusCode, a.Message, null),
             Domain.Common.DomainException d => (StatusCodes.Status409Conflict, d.Message, null),
             BadHttpRequestException b => (b.StatusCode, "Bad request", null),
+            AzureRequestException { IsAuthFailure: true } z => (StatusCodes.Status502BadGateway,
+                $"Azure DevOps rejected the credential (HTTP {z.Status}). Check that the PAT is valid and has the Work Items (Read & write) scope", null),
+            AzureRequestException z => (StatusCodes.Status502BadGateway, z.Message, null),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred", (Dictionary<string, string[]>?)null),
         };
         if (status >= 500) logger.LogError(exception, "Unhandled exception for {Method} {Path}", context.Request.Method, context.Request.Path);

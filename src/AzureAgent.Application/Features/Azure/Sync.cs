@@ -325,7 +325,7 @@ public sealed class ProjectSynchronizer(IAppDbContext db, AzureConnector connect
             db.Commits.Add(new Commit
             {
                 OrganizationId = project.OrganizationId, RepositoryId = repo.Id, CommitId = commit.CommitId, AuthorName = commit.AuthorName,
-                AuthorEmail = commit.AuthorEmail, Message = commit.Message, CommittedAt = commit.AuthoredAt,
+                AuthorEmail = commit.AuthorEmail, Message = commit.Message, CommittedAt = commit.AuthoredAt.ToUniversalTime(),
                 WebUrl = $"{repo.WebUrl}/commit/{commit.CommitId}", WorkItemAzureIds = ids,
             });
             added++;
