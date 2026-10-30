@@ -112,17 +112,24 @@ public sealed class ClaudeCodeAdapter(string executable) : ICodingCliAdapter
             allowed.AddRange(invocation.AllowedCommands.Where(c => c != "git").Select(c => $"Bash({c}:*)"));
         }
         var instructions = CliJson.WriteFile(invocation.HomeDirectory, "instructions.md", invocation.Instructions);
+        // --bare authenticates strictly with ANTHROPIC_API_KEY (OAuth and keychain are never read), so it
+        // cannot carry a Claude subscription token. Use it only on the API-key path; with a subscription
+        // token (CLAUDE_CODE_OAUTH_TOKEN) we drop it so the token is honored. Isolation still holds through
+        // the run's private empty HOME, --no-session-persistence, --strict-mcp-config, the restricted
+        // allowed/disallowed tools and --permission-mode dontAsk.
+        var hasSubscriptionToken = invocation.Credentials.ContainsKey(AzureAgent.Domain.Projects.SecretNames.ClaudeCodeOAuthToken);
         var arguments = new List<string>
         {
             "-p", invocation.Prompt,
             "--output-format", "stream-json", "--verbose",
             "--model", invocation.Model,
             "--permission-mode", "dontAsk",
-            "--bare", "--no-session-persistence", "--strict-mcp-config",
+            "--no-session-persistence", "--strict-mcp-config",
             "--max-turns", invocation.MaxTurns.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "--max-budget-usd", invocation.MaxBudgetUsd.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "--append-system-prompt-file", instructions,
         };
+        if (!hasSubscriptionToken) arguments.Add("--bare");
         arguments.AddRange(["--disallowedTools", "Bash(git:*)", "WebFetch", "WebSearch"]);
         arguments.Add("--allowedTools");
         arguments.AddRange(allowed);

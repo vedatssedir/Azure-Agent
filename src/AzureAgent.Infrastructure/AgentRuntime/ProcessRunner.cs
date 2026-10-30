@@ -121,21 +121,39 @@ public sealed class ProcessRunner(IOptions<AgentRuntimeOptions> options) : IProc
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
+        Exception? callbackError = null;
+        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
         try
         {
             if (onOutputLine is null)
             {
                 process.OutputDataReceived += (_, e) => Append(e.Data);
                 process.BeginOutputReadLine();
+                await process.WaitForExitAsync(timeoutCts.Token);
             }
             else
             {
-                while (await process.StandardOutput.ReadLineAsync(timeoutCts.Token) is { } line)
+                // Read stdout on a background task and wait for the PROCESS to exit, not for stdout to
+                // reach EOF. A tool the CLI spawns (e.g. a shell command) can inherit the stdout pipe and
+                // keep it open after the CLI itself has exited; waiting for EOF would then block the read —
+                // and the whole run — until the timeout. On exit we give the reader a brief grace to flush
+                // buffered lines, then stop it and kill the tree to release any lingering child.
+                var reader = Task.Run(async () =>
                 {
-                    if (line.Length > 0) await onOutputLine(line);
-                }
+                    try
+                    {
+                        while (await process.StandardOutput.ReadLineAsync(readCts.Token) is { } line)
+                            if (line.Length > 0) await onOutputLine(line);
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex) { callbackError = ex; Kill(process); }
+                });
+                await process.WaitForExitAsync(timeoutCts.Token);
+                readCts.CancelAfter(TimeSpan.FromSeconds(2));
+                await reader;
+                Kill(process);
+                if (callbackError is not null) throw callbackError;
             }
-            await process.WaitForExitAsync(timeoutCts.Token);
         }
         catch (OperationCanceledException)
         {

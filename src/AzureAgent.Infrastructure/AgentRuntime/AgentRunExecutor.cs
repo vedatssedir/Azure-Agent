@@ -26,6 +26,12 @@ public sealed class AgentRuntimeOptions
     /// <summary>Where the full git mirrors of every synced repository live (code browser, history).</summary>
     public string MirrorRoot { get; set; } = Path.Combine(Path.GetTempPath(), "azure-agent-mirrors");
     public bool KeepWorkspaces { get; set; }
+    /// <summary>
+    /// Cancel a run that makes no progress (no model or tool step) for this long. Guards against a
+    /// model API call or a CLI output stream that hangs with no response, which would otherwise keep
+    /// the run "Running" until the full per-run timeout. 0 disables the stall guard.
+    /// </summary>
+    public int StallTimeoutMinutes { get; set; } = 5;
     /// <summary>Executable of the Claude Code CLI (npm package @anthropic-ai/claude-code).</summary>
     public string ClaudeCliPath { get; set; } = "claude";
     /// <summary>Executable of the Cursor CLI.</summary>
@@ -58,6 +64,7 @@ public sealed partial class AgentRunExecutor(
     ILogger<AgentRunExecutor> logger)
 {
     private int _sequence;
+    private long _lastProgressTicks;
 
     public async Task ExecuteAsync(Guid runId, CancellationToken ct)
     {
@@ -87,7 +94,36 @@ public sealed partial class AgentRunExecutor(
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromMinutes(agent.Settings.TimeoutMinutes));
-        var runDir = Path.Combine(options.Value.WorkspaceRoot, run.OrganizationId.ToString("N"), run.Id.ToString("N"));
+        // Stall guard: cancel the run if it makes no progress (no model/tool step) for StallTimeoutMinutes.
+        // This aborts a hung model API call or a stuck CLI output stream, which would otherwise hold the
+        // run in "Running" until the full per-run timeout. Cancelling `timeout` aborts the in-flight call.
+        Interlocked.Exchange(ref _lastProgressTicks, clock.UtcNow.Ticks);
+        var stall = TimeSpan.FromMinutes(options.Value.StallTimeoutMinutes);
+        var stalled = false;
+        using var watchdogCts = new CancellationTokenSource();
+        var watchdog = stall <= TimeSpan.Zero ? Task.CompletedTask : Task.Run(async () =>
+        {
+            try
+            {
+                while (!watchdogCts.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(15), watchdogCts.Token);
+                    var idle = clock.UtcNow - new DateTime(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
+                    if (idle >= stall && !timeout.IsCancellationRequested)
+                    {
+                        stalled = true;
+                        logger.LogWarning("Run {RunId} made no progress for {Idle}; cancelling (stall timeout)", run.Id, idle);
+                        timeout.Cancel();
+                        break;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+        }, watchdogCts.Token);
+        // Absolute: child processes (git, CLI agents) run with their own working directory, so a relative
+        // WorkspaceRoot (e.g. "./.workspaces" in Development) would make paths we hand them resolve against
+        // the wrong directory — the system-prompt file path in particular would double up and go missing.
+        var runDir = Path.GetFullPath(Path.Combine(options.Value.WorkspaceRoot, run.OrganizationId.ToString("N"), run.Id.ToString("N")));
         // Private HOME for every process of the run (git, build tools, CLI agents): nothing leaks between runs or tenants.
         var homeDir = runDir + ".home";
         try
@@ -101,12 +137,16 @@ public sealed partial class AgentRunExecutor(
         }
         catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            var message = e is OperationCanceledException ? $"Run timed out after {agent.Settings.TimeoutMinutes} minutes" : e.Message;
+            var message = e is not OperationCanceledException ? e.Message
+                : stalled ? $"Run cancelled: no progress for {options.Value.StallTimeoutMinutes} minutes (stall timeout)"
+                : $"Run timed out after {agent.Settings.TimeoutMinutes} minutes";
             logger.LogWarning(e, "Run {RunId} failed", run.Id);
             await FailAsync(run, message, CancellationToken.None);
         }
         finally
         {
+            watchdogCts.Cancel();
+            try { await watchdog; } catch (OperationCanceledException) { }
             if (!options.Value.KeepWorkspaces && Directory.Exists(runDir)) TryDelete(runDir);
             if (Directory.Exists(homeDir)) TryDelete(homeDir);
         }
@@ -444,6 +484,7 @@ public sealed partial class AgentRunExecutor(
         ProcessResult exit;
         try
         {
+            logger.LogInformation("[CLI-DBG] launching {Exe} in {Dir} (args: {Args})", cli.Executable, workDir, string.Join(' ', arguments));
             exit = await processes.RunStreamingAsync(cli.Executable, arguments, workDir, environment, TimeSpan.FromMinutes(agent.Settings.TimeoutMinutes), async line =>
             {
                 foreach (var e in cli.Parse(line))
@@ -478,6 +519,8 @@ public sealed partial class AgentRunExecutor(
         {
             throw new InvalidOperationException($"{cli.DisplayName} is not installed on this worker ('{cli.Executable}'). Install it or set AgentRuntime:{(agent.Runtime == AgentRuntime.ClaudeCode ? "ClaudeCliPath" : "CursorCliPath")}.");
         }
+        logger.LogInformation("[CLI-DBG] stream ended: exitCode={Code} timedOut={TimedOut} hasResult={HasResult} modelCalls={Calls} toolCalls={Tools}",
+            exit.ExitCode, exit.TimedOut, result is not null, run.ModelCalls, run.ToolCalls);
 
         if (result is null)
             throw new InvalidOperationException(exit.TimedOut
@@ -545,6 +588,7 @@ public sealed partial class AgentRunExecutor(
     private async Task AddStepAsync(AgentRun run, RunStepType type, string title, string? detail, long input = 0, long output = 0, decimal cost = 0,
         int durationMs = 0, CancellationToken ct = default)
     {
+        Interlocked.Exchange(ref _lastProgressTicks, clock.UtcNow.Ticks);
         if (_sequence == 0) _sequence = await db.AgentRunSteps.Where(s => s.RunId == run.Id).CountAsync(ct);
         db.AgentRunSteps.Add(new AgentRunStep
         {
