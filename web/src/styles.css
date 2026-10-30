@@ -201,7 +201,7 @@ label.check .hint { display: block; font-size: 12px; color: var(--muted); }
 .page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
 .page-head .subtitle { color: var(--muted); font-size: 14px; margin-top: 4px; }
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
-.toolbar select, .toolbar input { width: auto; min-width: 160px; }
+.toolbar select, .toolbar input:not([type="checkbox"], [type="radio"]) { width: auto; min-width: 160px; }
 .card { background: var(--card); color: var(--foreground); border: 1px solid var(--border); border-radius: var(--radius-xl, 14px); padding: 20px; box-shadow: var(--shadow-xs); }
 .card.flush { padding: 0; overflow: hidden; }
 .card.hover { transition: box-shadow .15s, border-color .15s; }
