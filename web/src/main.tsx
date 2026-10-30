@@ -7,6 +7,9 @@ import { session, type Me, type Project } from "./api";
 import { AppContext, lastProject, useApp } from "./context";
 import { Avatar, ErrorBox, Loading, useGet } from "./components/ui";
 import { Icon } from "./components/icons";
+import { cn } from "./lib/utils";
+import { useTheme, type Theme } from "./lib/theme";
+import { ChevronRight, ChevronsUpDown, LogOut, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react";
 import { AcceptInvitation, AuthCallback, AuthPages } from "./pages/Login";
 import { Account } from "./pages/Account";
 import { Home } from "./pages/Home";
@@ -74,14 +77,39 @@ function useCurrentProject(): Project | null {
   return project;
 }
 
+const NAV_KEY = "azure-agent.sidebar-collapsed";
+const readCollapsed = () => { try { return localStorage.getItem(NAV_KEY) === "1"; } catch { return false; } };
+
 function Layout({ loading }: { loading: boolean }) {
   const { me, organization, isAdmin, projects } = useApp();
   const project = useCurrentProject();
   const navigate = useNavigate();
   const location = useLocation();
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const base = project ? `/p/${project.id}` : null;
-  const nav = (to: string, icon: string, label: string, sub = false, end = false) => (
-    <NavLink to={to} end={end} className={({ isActive }) => `nav-item${sub ? " nav-sub" : ""}${isActive ? " active" : ""}`}><Icon name={icon} />{label}</NavLink>
+  useEffect(() => setMobileOpen(false), [location.pathname]);
+  const toggle = () => {
+    if (window.matchMedia?.("(max-width: 767px)").matches) { setMobileOpen(!mobileOpen); return; }
+    const next = !collapsed;
+    setCollapsed(next);
+    try { localStorage.setItem(NAV_KEY, next ? "1" : "0"); } catch { /* not remembered */ }
+  };
+  const nav = (to: string, icon: string, label: string, end = false) => (
+    <NavLink to={to} end={end} title={collapsed ? label : undefined}
+      className={({ isActive }) => cn(
+        "flex h-8 items-center gap-2 rounded-md px-2 text-sm text-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-foreground hover:no-underline [&>svg]:shrink-0",
+        isActive && "bg-sidebar-accent font-medium text-foreground",
+        collapsed && "md:justify-center md:px-0",
+      )}>
+      <Icon name={icon} /><span className={cn("truncate", collapsed && "md:hidden")}>{label}</span>
+    </NavLink>
+  );
+  const group = (label: string, children: React.ReactNode) => (
+    <div className="flex flex-col gap-0.5 p-2">
+      <div className={cn("flex h-8 items-center px-2 text-xs font-medium text-muted-foreground", collapsed && "md:hidden")}>{label}</div>
+      {children}
+    </div>
   );
   const switchProject = (id: string) => {
     lastProject.set(id);
@@ -89,69 +117,97 @@ function Layout({ loading }: { loading: boolean }) {
     navigate(`/p/${id}${rest.startsWith("/repos") ? "/repos/files" : rest.startsWith("/pullrequests") ? "/pullrequests" : rest}`);
   };
   return (
-    <div className="app">
-      <header className="topbar">
-        <Link to="/" className="logo"><Icon name="logo" size={20} /> Azure Agent</Link>
-        <nav className="crumbs" aria-label="Konum">
-          <span>/</span><Link to="/">{organization.name}</Link>
-          {project && location.pathname.startsWith("/p/") ? <><span>/</span><Link to={`/p/${project.id}/board`}>{project.name}</Link></> : null}
-        </nav>
-        <span className="spacer" />
-        <UserMenu name={me.user.displayName} email={me.user.email} />
-      </header>
-      <aside className="nav">
-        {projects.length > 0 ? (
-          <div className="project-switch">
-            <select aria-label="Proje" value={project?.id ?? ""} onChange={(e) => switchProject(e.target.value)}>
+    <div className="flex h-full bg-sidebar">
+      {mobileOpen ? <div className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setMobileOpen(false)} /> : null}
+      <aside aria-label="Gezinme" className={cn(
+        "fixed inset-y-0 left-0 z-50 flex w-64 flex-col bg-sidebar transition-[width,transform] duration-200 md:static md:translate-x-0",
+        mobileOpen ? "translate-x-0 border-r shadow-lg" : "-translate-x-full",
+        collapsed && "md:w-14",
+      )}>
+        <div className="flex flex-col gap-2 p-2">
+          <Link to="/" className={cn("flex items-center gap-2 rounded-md p-2 text-foreground hover:bg-sidebar-accent hover:no-underline", collapsed && "md:justify-center md:p-1.5")}>
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground"><Icon name="logo" /></span>
+            <span className={cn("grid min-w-0 flex-1 content-center leading-tight", collapsed && "md:hidden")}>
+              <span className="truncate text-sm font-semibold">Azure Agent</span>
+              <span className="truncate text-xs text-muted-foreground">{organization.name}</span>
+            </span>
+          </Link>
+          {projects.length > 0 && !collapsed ? (
+            <select aria-label="Proje" className="h-9 bg-background font-medium shadow-xs" value={project?.id ?? ""} onChange={(e) => switchProject(e.target.value)}>
               {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
-          </div>
-        ) : null}
-        {nav("/", "home", "Genel bakış", false, true)}
-        {nav("/mine", "mine", "Bana atananlar")}
-        {base ? <>
-          <div className="nav-section">Boards</div>
-          {nav(`${base}/board`, "boards", "Board")}
-          {nav(`${base}/workitems`, "workitems", "Work items")}
-          {nav(`${base}/sprint`, "sprint", "Sprint")}
-          <div className="nav-section">Repos</div>
-          {nav(`${base}/repos/files`, "files", "Dosyalar")}
-          {nav(`${base}/repos/commits`, "commits", "Commit'ler")}
-          {nav(`${base}/repos/branches`, "branch", "Branch'ler")}
-          {nav(`${base}/pullrequests`, "pr", "Pull request'ler")}
-        </> : null}
-        <div className="nav-section">Agent'lar</div>
-        {nav("/agents", "agents", "Agent'larım")}
-        {nav("/runs", "runs", "Çalıştırmalar")}
-        {nav("/costs", "costs", "Maliyet")}
-        <div className="bottom">
-          {isAdmin ? nav("/settings", "settings", "Ayarlar") : null}
+          ) : null}
+        </div>
+        <nav className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+          {group("Genel", <>
+            {nav("/", "home", "Genel bakış", true)}
+            {nav("/mine", "mine", "Bana atananlar")}
+          </>)}
+          {base ? <>
+            {group("Boards", <>
+              {nav(`${base}/board`, "boards", "Board")}
+              {nav(`${base}/workitems`, "workitems", "Work items")}
+              {nav(`${base}/sprint`, "sprint", "Sprint")}
+            </>)}
+            {group("Repos", <>
+              {nav(`${base}/repos/files`, "files", "Dosyalar")}
+              {nav(`${base}/repos/commits`, "commits", "Commit'ler")}
+              {nav(`${base}/repos/branches`, "branch", "Branch'ler")}
+              {nav(`${base}/pullrequests`, "pr", "Pull request'ler")}
+            </>)}
+          </> : null}
+          {group("Agent'lar", <>
+            {nav("/agents", "agents", "Agent'larım")}
+            {nav("/runs", "runs", "Çalıştırmalar")}
+            {nav("/costs", "costs", "Maliyet")}
+          </>)}
+          {isAdmin ? group("Yönetim", nav("/settings", "settings", "Ayarlar")) : null}
+        </nav>
+        <div className="p-2">
+          <UserMenu name={me.user.displayName} email={me.user.email} compact={collapsed} />
         </div>
       </aside>
-      <main className="main">
-        {loading ? <Loading /> : (
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/mine" element={<MyWork />} />
-            <Route path="/p/:projectId" element={<Navigate to="board" replace />} />
-            <Route path="/p/:projectId/board" element={<ProjectRoute><BoardPage /></ProjectRoute>} />
-            <Route path="/p/:projectId/workitems" element={<ProjectRoute><WorkItems /></ProjectRoute>} />
-            <Route path="/p/:projectId/sprint" element={<ProjectRoute><SprintPage /></ProjectRoute>} />
-            <Route path="/p/:projectId/repos/:view" element={<ProjectRoute><Repos /></ProjectRoute>} />
-            <Route path="/p/:projectId/pullrequests" element={<ProjectRoute><PullRequests /></ProjectRoute>} />
-            <Route path="/p/:projectId/pullrequests/:pullRequestId" element={<ProjectRoute><PullRequestPage /></ProjectRoute>} />
-            <Route path="/agents" element={<Agents />} />
-            <Route path="/runs" element={<Runs />} />
-            <Route path="/runs/:runId" element={<RunPage />} />
-            <Route path="/costs" element={<Costs />} />
-            <Route path="/settings" element={isAdmin ? <SettingsPage /> : <Navigate to="/" replace />} />
-            <Route path="/settings/:tab" element={isAdmin ? <SettingsPage /> : <Navigate to="/" replace />} />
-            <Route path="/account" element={<Account />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        )}
-        <WorkItemHost />
-      </main>
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background md:m-2 md:ml-0 md:rounded-xl md:border md:shadow-xs">
+        <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+          <button className="ghost size-8 p-0" aria-label="Menüyü aç/kapat" onClick={toggle}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
+          <span className="h-4 w-px bg-border" />
+          <nav aria-label="Konum" className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+            <Link to="/" className="truncate text-muted-foreground hover:text-foreground hover:no-underline">{organization.name}</Link>
+            {project && location.pathname.startsWith("/p/") ? <>
+              <ChevronRight size={14} className="shrink-0" />
+              <Link to={`/p/${project.id}/board`} className="truncate font-medium text-foreground hover:no-underline">{project.name}</Link>
+            </> : null}
+          </nav>
+          <span className="flex-1" />
+          <ThemeToggle />
+        </header>
+        <main className="min-w-0 flex-1 overflow-auto px-4 py-6 md:px-8">
+          <div className="mx-auto w-full max-w-[1600px]">
+            {loading ? <Loading /> : (
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/mine" element={<MyWork />} />
+                <Route path="/p/:projectId" element={<Navigate to="board" replace />} />
+                <Route path="/p/:projectId/board" element={<ProjectRoute><BoardPage /></ProjectRoute>} />
+                <Route path="/p/:projectId/workitems" element={<ProjectRoute><WorkItems /></ProjectRoute>} />
+                <Route path="/p/:projectId/sprint" element={<ProjectRoute><SprintPage /></ProjectRoute>} />
+                <Route path="/p/:projectId/repos/:view" element={<ProjectRoute><Repos /></ProjectRoute>} />
+                <Route path="/p/:projectId/pullrequests" element={<ProjectRoute><PullRequests /></ProjectRoute>} />
+                <Route path="/p/:projectId/pullrequests/:pullRequestId" element={<ProjectRoute><PullRequestPage /></ProjectRoute>} />
+                <Route path="/agents" element={<Agents />} />
+                <Route path="/runs" element={<Runs />} />
+                <Route path="/runs/:runId" element={<RunPage />} />
+                <Route path="/costs" element={<Costs />} />
+                <Route path="/settings" element={isAdmin ? <SettingsPage /> : <Navigate to="/" replace />} />
+                <Route path="/settings/:tab" element={isAdmin ? <SettingsPage /> : <Navigate to="/" replace />} />
+                <Route path="/account" element={<Account />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            )}
+          </div>
+          <WorkItemHost />
+        </main>
+      </div>
     </div>
   );
 }
@@ -163,7 +219,18 @@ function ProjectRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function UserMenu({ name, email }: { name: string; email: string }) {
+function ThemeToggle() {
+  const [theme, setTheme] = useTheme();
+  const next: Record<Theme, Theme> = { light: "dark", dark: "system", system: "light" };
+  const label: Record<Theme, string> = { light: "Açık tema", dark: "Koyu tema", system: "Sistem teması" };
+  return (
+    <button className="ghost size-8 p-0" title={label[theme]} aria-label={`${label[theme]} (değiştir)`} onClick={() => setTheme(next[theme])}>
+      {theme === "light" ? <Sun size={16} /> : theme === "dark" ? <Moon size={16} /> : <Monitor size={16} />}
+    </button>
+  );
+}
+
+function UserMenu({ name, email, compact }: { name: string; email: string; compact: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -172,13 +239,23 @@ function UserMenu({ name, email }: { name: string; email: string }) {
     return () => document.removeEventListener("mousedown", close);
   }, []);
   return (
-    <div className="user" ref={ref}>
-      <button className="ghost" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}><Avatar name={name} /> {name}</button>
+    <div className="relative" ref={ref}>
+      <button aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}
+        className={cn("ghost h-12 w-full justify-start gap-2 px-2 text-left font-normal hover:bg-sidebar-accent", compact && "md:justify-center md:px-0")}>
+        <Avatar name={name} size="lg" />
+        <span className={cn("grid min-w-0 flex-1 content-center leading-tight", compact && "md:hidden")}>
+          <span className="truncate text-sm font-semibold">{name}</span>
+          <span className="truncate text-xs text-muted-foreground">{email}</span>
+        </span>
+        <ChevronsUpDown size={16} className={cn("shrink-0 text-muted-foreground", compact && "md:hidden")} />
+      </button>
       {open ? (
-        <div className="menu" role="menu">
-          <div style={{ padding: "8px 12px" }}><strong>{name}</strong><div className="small muted">{email}</div></div>
-          <Link to="/account" onClick={() => setOpen(false)}>Hesabım ve Azure bağlantım</Link>
-          <button onClick={() => session.signOut()}>Çıkış yap</button>
+        <div className="menu bottom-full left-0 right-auto top-auto mb-2 w-60" role="menu">
+          <div className="px-2 py-1.5 text-sm"><div className="font-semibold">{name}</div><div className="truncate text-xs text-muted-foreground">{email}</div></div>
+          <div className="-mx-1 my-1 h-px bg-border" />
+          <Link to="/account" onClick={() => setOpen(false)}><UserRound size={16} /> Hesabım ve Azure bağlantım</Link>
+          <div className="-mx-1 my-1 h-px bg-border" />
+          <button onClick={() => session.signOut()}><LogOut size={16} /> Çıkış yap</button>
         </div>
       ) : null}
     </div>
